@@ -1,0 +1,104 @@
+table inet {{ table }}
+delete table inet {{ table }}
+table inet {{ table }} {
+{%- for set in sets %}
+	set {{ set.name }} {
+		{{ set.declaration }}
+		{%- if !set.elements.is_empty() %}
+		elements = { {{ set.elements|join(", ") }} }
+		{%- endif %}
+	}
+{%- endfor %}
+
+	chain output {
+		type route hook output priority mangle; policy accept;
+		meta l4proto != { tcp, udp } return
+		# sing-box marks its sockets through route.default_mark; other marked sockets belong to
+		# software that routes its own traffic.
+		meta mark != 0 return
+		ct direction reply return
+		ct mark & {{ mask }} == {{ local }} meta mark set meta mark & {{ keep }} | {{ local }} return
+		# Rule changes apply to new connections only; rerouting an established one would break it.
+		ct state != new return
+		{%- if output.exclude_all %}
+		return
+		{%- endif %}
+		{%- for matcher in output.exclude %}
+		{{ matcher }} return
+		{%- endfor %}
+		{%- for matcher in output.include %}
+		{{ matcher }} goto output_destination
+		{%- endfor %}
+		{%- if output.include_all %}
+		goto output_destination
+		{%- endif %}
+	}
+
+	chain output_destination {
+		{%- for matcher in output.destinations %}
+		{{ matcher }} goto output_selected
+		{%- else %}
+		goto output_selected
+		{%- endfor %}
+	}
+
+	chain output_selected {
+		# A tproxy reply socket cannot bind the address and port of a resolver on this host while
+		# the resolver holds them, so queries to it are redirected instead.
+		fib daddr type local th dport 53 ct mark set ct mark & {{ keep }} | {{ dns }} return
+		fib daddr type { local, broadcast, multicast } return
+		ip daddr 169.254.0.0/16 return
+		ip6 daddr fe80::/10 return
+		ct mark set ct mark & {{ keep }} | {{ local }} meta mark set meta mark & {{ keep }} | {{ local }}
+	}
+
+	chain dns_redirect {
+		type nat hook output priority dstnat; policy accept;
+		ct mark & {{ mask }} == {{ dns }} meta l4proto { tcp, udp } redirect to :{{ dns_port }}
+	}
+
+	chain prerouting {
+		type filter hook prerouting priority mangle; policy accept;
+		meta l4proto != { tcp, udp } return
+		# Local traffic marked in output comes back through lo.
+		iif lo meta mark & {{ mask }} == {{ local }} goto deliver
+		iif lo return
+		meta mark != 0 return
+		ct direction reply return
+		ct mark & {{ mask }} == {{ forward }} meta mark set meta mark & {{ keep }} | {{ forward }} goto deliver
+		ct state != new return
+		fib daddr type { local, broadcast, multicast } return
+		ip daddr 169.254.0.0/16 return
+		ip6 daddr fe80::/10 return
+		{%- for matcher in prerouting.exclude %}
+		{{ matcher }} return
+		{%- endfor %}
+		{%- for matcher in prerouting.include %}
+		{{ matcher }} goto prerouting_destination
+		{%- endfor %}
+	}
+
+	chain prerouting_destination {
+		{%- for matcher in prerouting.destinations %}
+		{{ matcher }} goto prerouting_selected
+		{%- else %}
+		goto prerouting_selected
+		{%- endfor %}
+	}
+
+	chain prerouting_selected {
+		ct mark set ct mark & {{ keep }} | {{ forward }} meta mark set meta mark & {{ keep }} | {{ forward }} goto deliver
+	}
+
+	# `tproxy` is a keyword and cannot name a chain.
+	chain deliver {
+		meta nfproto ipv4 meta l4proto { tcp, udp } tproxy ip to 127.0.0.1:{{ tproxy_port }} accept
+		meta nfproto ipv6 meta l4proto { tcp, udp } tproxy ip6 to [::1]:{{ tproxy_port }} accept
+	}
+
+	# The tproxy inbound listens on the wildcard address; only redirected traffic may reach it.
+	chain input {
+		type filter hook input priority filter; policy accept;
+		iif != lo fib daddr type local meta l4proto { tcp, udp } th dport {{ tproxy_port }} drop
+	}
+}

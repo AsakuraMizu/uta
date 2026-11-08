@@ -1,0 +1,18 @@
+{
+  "log": { "level": "info" },
+  "dns": {
+    "servers": [{ "type": "udp", "tag": "remote", "server": "127.0.0.1", "detour": "relay" }],
+    "final": "remote"
+  },
+  "outbounds": [
+    { "type": "socks", "tag": "relay", "server": "10.0.3.2", "server_port": 1080 },
+    { "type": "direct", "tag": "direct" }
+  ],
+  "route": {
+    "rules": [
+      { "inbound": ["uta-dns", "uta-dns6"], "action": "hijack-dns" },
+      { "port": 53, "action": "hijack-dns" }
+    ],
+    "final": "relay"
+  }
+}

@@ -1,0 +1,3 @@
+[singbox]
+# Files and directories relative to this one; files in a directory merge in name order.
+config = ["sing-box"]

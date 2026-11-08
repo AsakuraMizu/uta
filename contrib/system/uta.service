@@ -1,0 +1,20 @@
+[Unit]
+Description=uta transparent proxy
+After=network.target
+
+[Service]
+User=uta
+Group=uta
+ExecStart=/usr/bin/uta daemon --config /etc/uta/uta.toml --rules /etc/uta/rules --runtime-dir /run/uta
+ExecStopPost=+/usr/bin/uta cleanup
+RuntimeDirectory=uta
+# A writable home for state sing-box keeps, such as certificates and its cache file;
+# /etc/uta, where relative paths in its configuration resolve, is read-only to uta.
+StateDirectory=uta
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+# uta stops sing-box itself after removing its rules.
+KillMode=mixed
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

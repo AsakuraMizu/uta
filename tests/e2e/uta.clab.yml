@@ -1,0 +1,120 @@
+# Topology for `cargo test --test e2e`, deployed by lab.sh. The uta nodes run target/debug/uta.
+#
+#   workstation ──────┐
+#                     ├─ wan ─┬─ relay   SOCKS5 proxy, resolver behind the proxy
+#   client ─ router ──┘       └─ origin  echo, resolver reached directly
+#
+# workstation, router and relay run uta-e2e/ubuntu with systemd; the others run uta-e2e/alpine.
+name: uta
+
+mgmt:
+  skip-when-unused: true
+
+topology:
+  defaults:
+    network-mode: none
+
+  kinds:
+    linux:
+      tmpfs:
+        /run: rw,nosuid,nodev
+        /run/lock: rw,nosuid,nodev,noexec
+        /tmp: rw,nosuid,nodev
+
+  nodes:
+    # Not named host: a link endpoint host:<ifname> means the host's network namespace.
+    workstation:
+      kind: linux
+      image: uta-e2e/ubuntu
+      binds:
+        - ../../target/debug:/opt/uta:ro
+        - ../../contrib/user/uta.service:/home/alice/.config/systemd/user/uta.service:ro
+      exec:
+        # Docker leaves the hostname out of /etc/hosts without a network, and sudo looks it up.
+        - sh -c 'echo "127.0.1.1 workstation" >> /etc/hosts'
+        - sh -c 'echo "nameserver 127.0.0.53" > /etc/resolv.conf'
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip addr add fd00:1::2/64 dev eth1 nodad
+        - ip route add default via 10.0.1.1
+        - ip -6 route add default via fd00:1::1
+
+    router:
+      kind: linux
+      image: uta-e2e/ubuntu
+      binds:
+        - ../../target/debug:/opt/uta:ro
+        - ../../contrib/system/uta.service:/etc/systemd/system/uta.service:ro
+        - ../../contrib/system/uta.sysusers:/usr/lib/sysusers.d/uta.conf:ro
+        - ../../contrib/system/uta.toml:/etc/uta/uta.toml:ro
+      sysctls:
+        net.ipv4.ip_forward: 1
+        net.ipv6.conf.all.forwarding: 1
+      exec:
+        - systemd-sysusers
+        - ip addr add 10.0.2.2/24 dev eth1
+        - ip addr add fd00:2::2/64 dev eth1 nodad
+        - ip route add default via 10.0.2.1
+        - ip -6 route add default via fd00:2::1
+        - ip addr add 192.168.10.1/24 dev eth2
+        - ip addr add fd00:10::1/64 dev eth2 nodad
+
+    client:
+      kind: linux
+      image: uta-e2e/alpine
+      cmd: sleep infinity
+      exec:
+        - ip addr add 192.168.10.2/24 dev eth1
+        - ip addr add fd00:10::2/64 dev eth1 nodad
+        - ip route add default via 192.168.10.1
+        - ip -6 route add default via fd00:10::1
+
+    wan:
+      kind: linux
+      image: uta-e2e/alpine
+      cmd: sleep infinity
+      sysctls:
+        net.ipv4.ip_forward: 1
+        net.ipv6.conf.all.forwarding: 1
+      exec:
+        - ip addr add 10.0.1.1/24 dev eth1
+        - ip addr add fd00:1::1/64 dev eth1 nodad
+        - ip addr add 10.0.2.1/24 dev eth2
+        - ip addr add fd00:2::1/64 dev eth2 nodad
+        - ip addr add 10.0.3.1/24 dev eth3
+        - ip addr add fd00:3::1/64 dev eth3 nodad
+        - ip addr add 10.0.4.1/24 dev eth4
+        - ip addr add fd00:4::1/64 dev eth4 nodad
+        - ip route add 192.168.10.0/24 via 10.0.2.2
+        - ip -6 route add fd00:10::/64 via fd00:2::2
+
+    relay:
+      kind: linux
+      # The official sing-box build links glibc.
+      image: uta-e2e/ubuntu
+      binds:
+        - relay:/etc/relay:ro
+      cmd: sh /etc/relay/start.sh
+      exec:
+        - ip addr add 10.0.3.2/24 dev eth1
+        - ip addr add fd00:3::2/64 dev eth1 nodad
+        - ip route add default via 10.0.3.1
+        - ip -6 route add default via fd00:3::1
+
+    origin:
+      kind: linux
+      image: uta-e2e/alpine
+      binds:
+        - origin:/etc/origin:ro
+      cmd: sh /etc/origin/start.sh
+      exec:
+        - ip addr add 10.0.4.2/24 dev eth1
+        - ip addr add fd00:4::2/64 dev eth1 nodad
+        - ip route add default via 10.0.4.1
+        - ip -6 route add default via fd00:4::1
+
+  links:
+    - endpoints: [workstation:eth1, wan:eth1]
+    - endpoints: [router:eth1, wan:eth2]
+    - endpoints: [router:eth2, client:eth1]
+    - endpoints: [relay:eth1, wan:eth3]
+    - endpoints: [origin:eth1, wan:eth4]
