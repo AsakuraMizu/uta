@@ -559,14 +559,22 @@ fn one_daemon_per_network_namespace() {
     stop_workstation();
 }
 
-/// Starts uta on the router as `contrib/system` deploys it.
+/// Starts uta on the router as `contrib/system` deploys it, with the local
+/// resolver running.
 fn start_router(rules: &str) {
+    // A previous test may have left sing-box holding the resolver's port.
+    stop_router();
+    ok("router", As::Root, "systemctl start dnsmasq");
+    start_router_with(rules, SING_BOX_CONFIG);
+}
+
+fn start_router_with(rules: &str, sing_box_config: &str) {
     stop_router();
     write("router", "/etc/uta/rules", rules, "root:root");
     write(
         "router",
         "/etc/uta/sing-box/config.json",
-        SING_BOX_CONFIG,
+        sing_box_config,
         "root:root",
     );
     ok(
@@ -621,4 +629,52 @@ fn captures_forwarded_traffic() {
     assert_eq!(seen("router", As::Root, ORIGIN), RELAY);
     stop_router();
     assert_eq!(seen("client", As::Root, ORIGIN), CLIENT);
+}
+
+#[test]
+fn dns_of_forwarded_clients_reaches_sing_box() {
+    let _topology = lock();
+    start_router("iif:eth2\n");
+    assert_eq!(resolve("client", As::Root, "192.168.10.1"), PROXIED);
+    assert_eq!(resolve("client", As::Root, "fd00:10::1"), PROXIED);
+    // Only redirected queries reach the DNS inbound.
+    assert!(
+        !sh(
+            "client",
+            As::Root,
+            "dig +short +time=2 +tries=1 -p 7853 @192.168.10.1 probe.test"
+        )
+        .status
+        .success()
+    );
+
+    start_router("iif:eth2\n!dst:192.168.10.1\n");
+    assert_eq!(resolve("client", As::Root, "192.168.10.1"), DIRECT);
+    stop_router();
+    assert_eq!(resolve("client", As::Root, "192.168.10.1"), DIRECT);
+}
+
+#[test]
+fn sing_box_can_replace_the_local_resolver() {
+    let _topology = lock();
+    let mut config: serde_json::Value = serde_json::from_str(SING_BOX_CONFIG).unwrap();
+    // Replies to captured queries for other resolvers leave from sockets bound
+    // to those resolvers' addresses and port 53, which a wildcard listener on
+    // port 53 allows only with reuse_addr.
+    config["inbounds"] = serde_json::json!([
+        { "type": "direct", "tag": "resolver", "listen": "::", "listen_port": 53, "reuse_addr": true }
+    ]);
+    config["route"]["rules"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({ "inbound": "resolver", "action": "hijack-dns" }));
+    stop_router();
+    ok("router", As::Root, "systemctl stop dnsmasq");
+    start_router_with("iif:eth2\n", &config.to_string());
+    assert_eq!(resolve("client", As::Root, "192.168.10.1"), PROXIED);
+    assert_eq!(resolve("client", As::Root, "10.0.4.2"), PROXIED);
+    // Software on the router that uta leaves alone uses sing-box directly.
+    assert_eq!(resolve("router", As::Root, "127.0.0.1"), PROXIED);
+    stop_router();
+    ok("router", As::Root, "systemctl start dnsmasq");
 }

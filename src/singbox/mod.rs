@@ -19,7 +19,6 @@ use crate::config::{Config, Marks, Ports};
 
 pub const TPROXY_INBOUND: &str = "uta-tproxy";
 pub const DNS_INBOUND: &str = "uta-dns";
-pub const DNS6_INBOUND: &str = "uta-dns6";
 
 /// The info-level line sing-box logs when every component has started
 /// (`box.go`).
@@ -34,8 +33,8 @@ pub fn fragment(ports: &Ports, marks: &Marks) -> Value {
     json!({
         "inbounds": [
             { "type": "tproxy", "tag": TPROXY_INBOUND, "listen": "::", "listen_port": ports.tproxy },
-            { "type": "direct", "tag": DNS_INBOUND, "listen": "127.0.0.1", "listen_port": ports.dns },
-            { "type": "direct", "tag": DNS6_INBOUND, "listen": "::1", "listen_port": ports.dns },
+            // Queries redirected in prerouting arrive at an address of the incoming interface.
+            { "type": "direct", "tag": DNS_INBOUND, "listen": "::", "listen_port": ports.dns },
         ],
         "route": { "default_mark": marks.mask },
         // uta detects startup from the log on sing-box's standard streams.

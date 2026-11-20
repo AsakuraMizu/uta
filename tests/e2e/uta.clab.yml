@@ -46,6 +46,7 @@ topology:
         - ../../contrib/system/uta.service:/etc/systemd/system/uta.service:ro
         - ../../contrib/system/uta.sysusers:/usr/lib/sysusers.d/uta.conf:ro
         - ../../contrib/system/uta.toml:/etc/uta/uta.toml:ro
+        - router/dnsmasq.conf:/etc/dnsmasq.d/lan.conf:ro
       sysctls:
         net.ipv4.ip_forward: 1
         net.ipv6.conf.all.forwarding: 1

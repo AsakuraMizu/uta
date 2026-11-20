@@ -282,6 +282,10 @@ impl fmt::Display for Selector {
             Self::Uid(User::Name(name)) => write!(f, "uid:{name}"),
             Self::Cgroup(pattern) => write!(f, "cgroup:/{}", pattern.segments.join("/")),
             Self::Iif(pattern) => write!(f, "iif:{}", pattern.0),
+            // A single address reads back as written, without a /32 or /128.
+            Self::Dst(net) if net.prefix_len() == net.max_prefix_len() => {
+                write!(f, "dst:{}", net.addr())
+            }
             Self::Dst(net) => write!(f, "dst:{net}"),
             Self::Port(port) => write!(f, "port:{port}"),
             Self::Oif(pattern) => write!(f, "oif:{}", pattern.0),
@@ -334,7 +338,9 @@ mod tests {
 
     #[test]
     fn dst_accepts_addresses_and_networks_but_not_host_bits() {
-        assert_eq!(rule("dst:192.0.2.1").to_string(), "dst:192.0.2.1/32");
+        assert_eq!(rule("dst:192.0.2.1/32"), rule("dst:192.0.2.1"));
+        assert_eq!(rule("dst:192.0.2.1/32").to_string(), "dst:192.0.2.1");
+        assert_eq!(rule("dst:2001:db8::1").to_string(), "dst:2001:db8::1");
         assert_eq!(rule("dst:2001:db8::/32").to_string(), "dst:2001:db8::/32");
         assert_eq!(
             error("dst:10.1.2.3/8"),

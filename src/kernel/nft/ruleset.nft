@@ -52,7 +52,7 @@ table inet {{ table }} {
 		ct mark set ct mark & {{ keep }} | {{ local }} meta mark set meta mark & {{ keep }} | {{ local }}
 	}
 
-	chain dns_redirect {
+	chain dns_redirect_output {
 		type nat hook output priority dstnat; policy accept;
 		ct mark & {{ mask }} == {{ dns }} meta l4proto { tcp, udp } redirect to :{{ dns_port }}
 	}
@@ -67,9 +67,6 @@ table inet {{ table }} {
 		ct direction reply return
 		ct mark & {{ mask }} == {{ forward }} meta mark set meta mark & {{ keep }} | {{ forward }} goto deliver
 		ct state != new return
-		fib daddr type { local, broadcast, multicast } return
-		ip daddr 169.254.0.0/16 return
-		ip6 daddr fe80::/10 return
 		{%- for matcher in prerouting.exclude %}
 		{{ matcher }} return
 		{%- endfor %}
@@ -87,7 +84,19 @@ table inet {{ table }} {
 	}
 
 	chain prerouting_selected {
+		# Queries from selected clients to a resolver on this host go to uta's DNS inbound, as in
+		# output_selected.
+		fib daddr type local th dport 53 ct mark set ct mark & {{ keep }} | {{ dns }} return
+		fib daddr type { local, broadcast, multicast } return
+		ip daddr 169.254.0.0/16 return
+		ip6 daddr fe80::/10 return
 		ct mark set ct mark & {{ keep }} | {{ forward }} meta mark set meta mark & {{ keep }} | {{ forward }} goto deliver
+	}
+
+	# The redirect rewrites the destination to an address of the incoming interface.
+	chain dns_redirect_prerouting {
+		type nat hook prerouting priority dstnat; policy accept;
+		ct mark & {{ mask }} == {{ dns }} meta l4proto { tcp, udp } redirect to :{{ dns_port }}
 	}
 
 	# `tproxy` is a keyword and cannot name a chain.
@@ -96,9 +105,11 @@ table inet {{ table }} {
 		meta nfproto ipv6 meta l4proto { tcp, udp } tproxy ip6 to [::1]:{{ tproxy_port }} accept
 	}
 
-	# The tproxy inbound listens on the wildcard address; only redirected traffic may reach it.
+	# The tproxy and DNS inbounds listen on the wildcard address; only traffic uta hands to them
+	# may reach them from outside.
 	chain input {
 		type filter hook input priority filter; policy accept;
 		iif != lo fib daddr type local meta l4proto { tcp, udp } th dport {{ tproxy_port }} drop
+		iif != lo fib daddr type local meta l4proto { tcp, udp } th dport {{ dns_port }} ct mark & {{ mask }} != {{ dns }} drop
 	}
 }
