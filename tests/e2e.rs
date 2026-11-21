@@ -260,7 +260,7 @@ fn dns_of_captured_sockets_reaches_sing_box() {
 }
 
 #[test]
-fn exclusions_and_destinations_narrow_capture() {
+fn conditions_narrow_capture() {
     let _topology = lock();
     start_workstation("uid:alice\n!dst:10.0.4.0/24\n");
     assert_eq!(seen("workstation", As::Alice, ORIGIN), WORKSTATION);
@@ -269,9 +269,42 @@ fn exclusions_and_destinations_narrow_capture() {
     start_workstation("uid:alice\n!oif:eth1\n");
     assert_eq!(seen("workstation", As::Alice, ORIGIN), WORKSTATION);
 
-    start_workstation("uid:alice\nport:9\n");
+    // Every condition of a rule must hold.
+    start_workstation("uid:alice port:9\n");
     assert_eq!(seen("workstation", As::Alice, ORIGIN), WORKSTATION);
     assert_eq!(seen_udp("workstation", As::Alice, "UDP4:10.0.4.2:9"), RELAY);
+
+    start_workstation("uid:alice proto:tcp\n");
+    assert_eq!(seen("workstation", As::Alice, ORIGIN), RELAY);
+    assert_eq!(
+        seen_udp("workstation", As::Alice, "UDP4:10.0.4.2:9"),
+        WORKSTATION
+    );
+
+    // Addresses of the other family are outside a negated IPv4 network.
+    start_workstation("uid:alice dst:!10.0.4.0/24\n");
+    assert_eq!(seen("workstation", As::Alice, ORIGIN), WORKSTATION);
+    assert_eq!(seen("workstation", As::Alice, ORIGIN6), RELAY6);
+
+    // Origin's networks are left alone, except DNS, so its resolver is still
+    // reached through sing-box.
+    start_workstation("uid:alice\n!dst:10.0.4.0/24,fd00:4::/64 port:!53\n");
+    assert_eq!(seen("workstation", As::Alice, ORIGIN), WORKSTATION);
+    assert_ne!(seen("workstation", As::Alice, ORIGIN6), RELAY6);
+    assert_eq!(resolve("workstation", As::Alice, "10.0.4.2"), PROXIED);
+    stop_workstation();
+}
+
+#[test]
+fn gid_selects_sockets_of_a_group() {
+    let _topology = lock();
+    ok("workstation", As::Root, "groupadd -f proxied");
+    start_workstation("gid:proxied\n");
+    let as_proxied = format!(
+        "setpriv --reuid=bob --regid=proxied --clear-groups curl -s --http0.9 -m 5 {ORIGIN}"
+    );
+    assert_eq!(ok("workstation", As::Root, &as_proxied), RELAY);
+    assert_eq!(seen("workstation", As::Bob, ORIGIN), WORKSTATION);
     stop_workstation();
 }
 
@@ -360,6 +393,26 @@ fn rules_file() -> String {
         As::Alice,
         &format!("cat {ALICE_CONFIG}/rules"),
     )
+}
+
+#[test]
+fn add_and_del_match_rules_by_meaning() {
+    let _topology = lock();
+    start_workstation("uid:alice\n");
+    assert!(
+        uta(As::Alice, "add --yes 'port:80,9 uid:bob'")
+            .status
+            .success()
+    );
+    assert_eq!(rules_file(), "uid:alice\nuid:bob port:9,80");
+    assert_eq!(seen_udp("workstation", As::Bob, "UDP4:10.0.4.2:9"), RELAY);
+    assert!(
+        uta(As::Alice, "del --yes 'uid:bob port:9,80,9'")
+            .status
+            .success()
+    );
+    assert_eq!(rules_file(), "uid:alice");
+    stop_workstation();
 }
 
 #[test]
@@ -629,6 +682,25 @@ fn captures_forwarded_traffic() {
     assert_eq!(seen("router", As::Root, ORIGIN), RELAY);
     stop_router();
     assert_eq!(seen("client", As::Root, ORIGIN), CLIENT);
+}
+
+#[test]
+fn forwarded_traffic_by_source_address_or_mac() {
+    let _topology = lock();
+    start_router("src:192.168.10.2\n");
+    assert_eq!(seen("client", As::Root, ORIGIN), RELAY);
+    assert_ne!(seen("client", As::Root, ORIGIN6), RELAY6);
+
+    start_router("iif:eth2\n!src:192.168.10.2\n");
+    assert_eq!(seen("client", As::Root, ORIGIN), CLIENT);
+    assert_eq!(seen("client", As::Root, ORIGIN6), RELAY6);
+
+    let mac = ok("client", As::Root, "cat /sys/class/net/eth1/address");
+    start_router(&format!("mac:{mac}\n"));
+    assert_eq!(seen("client", As::Root, ORIGIN), RELAY);
+    start_router("mac:02:00:5e:10:00:01\n");
+    assert_eq!(seen("client", As::Root, ORIGIN), CLIENT);
+    stop_router();
 }
 
 #[test]

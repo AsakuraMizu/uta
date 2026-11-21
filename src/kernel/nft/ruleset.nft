@@ -20,25 +20,11 @@ table inet {{ table }} {
 		ct mark & {{ mask }} == {{ local }} meta mark set meta mark & {{ keep }} | {{ local }} return
 		# Rule changes apply to new connections only; rerouting an established one would break it.
 		ct state != new return
-		{%- if output.exclude_all %}
-		return
-		{%- endif %}
-		{%- for matcher in output.exclude %}
-		{{ matcher }} return
+		{%- for matchers in output.exclude %}
+		{{ matchers }} return
 		{%- endfor %}
-		{%- for matcher in output.include %}
-		{{ matcher }} goto output_destination
-		{%- endfor %}
-		{%- if output.include_all %}
-		goto output_destination
-		{%- endif %}
-	}
-
-	chain output_destination {
-		{%- for matcher in output.destinations %}
-		{{ matcher }} goto output_selected
-		{%- else %}
-		goto output_selected
+		{%- for matchers in output.include %}
+		{{ matchers }} goto output_selected
 		{%- endfor %}
 	}
 
@@ -67,19 +53,11 @@ table inet {{ table }} {
 		ct direction reply return
 		ct mark & {{ mask }} == {{ forward }} meta mark set meta mark & {{ keep }} | {{ forward }} goto deliver
 		ct state != new return
-		{%- for matcher in prerouting.exclude %}
-		{{ matcher }} return
+		{%- for matchers in prerouting.exclude %}
+		{{ matchers }} return
 		{%- endfor %}
-		{%- for matcher in prerouting.include %}
-		{{ matcher }} goto prerouting_destination
-		{%- endfor %}
-	}
-
-	chain prerouting_destination {
-		{%- for matcher in prerouting.destinations %}
-		{{ matcher }} goto prerouting_selected
-		{%- else %}
-		goto prerouting_selected
+		{%- for matchers in prerouting.include %}
+		{{ matchers }} goto prerouting_selected
 		{%- endfor %}
 	}
 

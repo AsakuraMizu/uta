@@ -1,38 +1,61 @@
-//! Resolves rules against the running system: user names to IDs and cgroup
-//! patterns to the cgroups that exist.
+//! Resolves rules against the running system: user and group names to IDs and
+//! cgroup patterns to the cgroups that exist.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
-use nix::unistd::User as Passwd;
+use ipnet::IpNet;
+use nix::unistd::{Group, User};
 
-use super::{Cgroup, Selection, Side};
-use crate::config::rules::{CgroupPattern, Rule, Selector, User};
+use super::{Cgroup, Match, Selection, Test, Value};
+use crate::config::rules::{CgroupPattern, Id, Rule, Selector, Span};
 
-/// A selection, with a note for each rule on what it resolved to.
+/// Rules resolved, with a note for each on what it resolved to.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Resolved {
-    pub selection: Selection,
+    /// One for each rule, in the order of the rules.
+    pub matches: Vec<Match>,
     pub notes: Vec<Option<String>>,
     /// The directories whose children decide what the cgroup patterns match.
     pub dirs: BTreeSet<PathBuf>,
 }
 
+impl Resolved {
+    /// Adds the resolved `rules` to `selection`.
+    pub fn add_to(&self, rules: &[Rule], selection: &mut Selection) {
+        for (rule, resolved) in rules.iter().zip(&self.matches) {
+            let side = if rule.exclude {
+                &mut selection.exclude
+            } else {
+                &mut selection.include
+            };
+            side.push(resolved.clone());
+        }
+    }
+}
+
 pub fn resolve(rules: &[Rule], cgroup_root: &Path) -> Result<Resolved> {
     let mut resolved = Resolved::default();
     for rule in rules {
-        let side = side(&mut resolved.selection, rule);
-        let note = match &rule.selector {
-            Selector::Cgroup(pattern) => {
-                Some(add_cgroups(side, pattern, cgroup_root, &mut resolved.dirs)?)
-            }
-            selector => add(side, selector).with_context(|| format!("rule `{rule}`"))?,
+        let mut tests = Vec::new();
+        for condition in &rule.conditions {
+            let value = value(&condition.selector, cgroup_root, &mut resolved.dirs)
+                .with_context(|| format!("rule `{rule}`"))?;
+            tests.push(Test {
+                negated: condition.negated,
+                value,
+            });
+        }
+        let resolved_rule = Match {
+            origin: rule.origin(),
+            tests,
         };
-        resolved.notes.push(note);
+        resolved.notes.push(note(rule, &resolved_rule));
+        resolved.matches.push(resolved_rule);
     }
     Ok(resolved)
 }
@@ -41,80 +64,123 @@ pub fn resolve(rules: &[Rule], cgroup_root: &Path) -> Result<Resolved> {
 /// removed. On failure `resolved` is left as it was.
 pub fn refresh_cgroups(rules: &[Rule], resolved: &mut Resolved, cgroup_root: &Path) -> Result<()> {
     let mut fresh = resolved.clone();
-    fresh.selection.include.cgroups.clear();
-    fresh.selection.exclude.cgroups.clear();
     fresh.dirs.clear();
-    for (rule, note) in rules.iter().zip(&mut fresh.notes) {
-        if let Selector::Cgroup(pattern) = &rule.selector {
-            let side = side(&mut fresh.selection, rule);
-            *note = Some(add_cgroups(side, pattern, cgroup_root, &mut fresh.dirs)?);
+    for ((rule, resolved_rule), note) in rules.iter().zip(&mut fresh.matches).zip(&mut fresh.notes)
+    {
+        let mut changed = false;
+        for (condition, test) in rule.conditions.iter().zip(&mut resolved_rule.tests) {
+            if let Selector::Cgroup(patterns) = &condition.selector {
+                test.value = Value::Cgroup(cgroups(patterns, cgroup_root, &mut fresh.dirs)?);
+                changed = true;
+            }
+        }
+        if changed {
+            *note = self::note(rule, resolved_rule);
         }
     }
     *resolved = fresh;
     Ok(())
 }
 
-fn side<'a>(selection: &'a mut Selection, rule: &Rule) -> &'a mut Side {
-    if rule.exclude {
-        &mut selection.exclude
-    } else {
-        &mut selection.include
-    }
-}
-
-fn add(side: &mut Side, selector: &Selector) -> Result<Option<String>> {
+fn value(selector: &Selector, root: &Path, dirs: &mut BTreeSet<PathBuf>) -> Result<Value> {
     Ok(match selector {
-        Selector::Local => {
-            side.local = true;
-            None
-        }
-        Selector::Uid(User::Id(id)) => {
-            side.uids.insert(*id);
-            None
-        }
-        Selector::Uid(User::Name(name)) => {
-            let Some(user) = Passwd::from_name(name).context("failed to look up the user")? else {
+        Selector::Local => Value::Local,
+        Selector::Uid(ids) => Value::Uid(ids_of(ids, |name| {
+            let Some(user) = User::from_name(name).context("failed to look up the user")? else {
                 bail!("user {name} does not exist");
             };
-            side.uids.insert(user.uid.as_raw());
-            Some(format!("uid {}", user.uid))
-        }
-        Selector::Iif(pattern) => {
-            side.iifs.push(pattern.clone());
-            None
-        }
-        Selector::Oif(pattern) => {
-            side.oifs.push(pattern.clone());
-            None
-        }
-        Selector::Dst(net) => {
-            side.nets.push(*net);
-            None
-        }
-        Selector::Port(port) => {
-            side.ports.insert(*port);
-            None
-        }
-        Selector::Cgroup(_) => unreachable!("cgroups resolve through add_cgroups"),
+            Ok(user.uid.as_raw())
+        })?),
+        Selector::Gid(ids) => Value::Gid(ids_of(ids, |name| {
+            let Some(group) = Group::from_name(name).context("failed to look up the group")? else {
+                bail!("group {name} does not exist");
+            };
+            Ok(group.gid.as_raw())
+        })?),
+        Selector::Cgroup(patterns) => Value::Cgroup(cgroups(patterns, root, dirs)?),
+        Selector::Iif(patterns) => Value::Iif(patterns.clone()),
+        Selector::Src(nets) => Value::Src(IpNet::aggregate(nets)),
+        Selector::Mac(macs) => Value::Mac(macs.clone()),
+        Selector::Proto(protos) => Value::Proto(protos.clone()),
+        Selector::Dst(nets) => Value::Dst(IpNet::aggregate(nets)),
+        Selector::Port(ports) => Value::Port(merge(ports.clone())),
+        Selector::Oif(patterns) => Value::Oif(patterns.clone()),
     })
 }
 
-fn add_cgroups(
-    side: &mut Side,
-    pattern: &CgroupPattern,
+fn ids_of(ids: &[Id], lookup: impl Fn(&str) -> Result<u32>) -> Result<Vec<Span<u32>>> {
+    let spans = ids
+        .iter()
+        .map(|id| match id {
+            Id::Numbers(span) => Ok(*span),
+            Id::Name(name) => lookup(name).map(|id| Span {
+                first: id,
+                last: id,
+            }),
+        })
+        .collect::<Result<_>>()?;
+    Ok(merge(spans))
+}
+
+/// `spans` sorted, with overlapping and adjacent ones joined.
+fn merge<T: Ord + Copy + Into<u64>>(mut spans: Vec<Span<T>>) -> Vec<Span<T>> {
+    spans.sort();
+    let mut merged: Vec<Span<T>> = Vec::new();
+    for span in spans {
+        match merged.last_mut() {
+            Some(last) if span.first.into() <= last.last.into() + 1 => {
+                last.last = last.last.max(span.last);
+            }
+            _ => merged.push(span),
+        }
+    }
+    merged
+}
+
+/// What the rule resolved to, where the rules file does not say it.
+fn note(rule: &Rule, resolved: &Match) -> Option<String> {
+    let mut parts = Vec::new();
+    for (condition, test) in rule.conditions.iter().zip(&resolved.tests) {
+        let named = |ids: &[Id]| ids.iter().any(|id| matches!(id, Id::Name(_)));
+        let list = |spans: &[Span<u32>]| {
+            spans
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        match (&condition.selector, &test.value) {
+            (Selector::Uid(ids), Value::Uid(spans)) if named(ids) => {
+                parts.push(format!("uid {}", list(spans)));
+            }
+            (Selector::Gid(ids), Value::Gid(spans)) if named(ids) => {
+                parts.push(format!("gid {}", list(spans)));
+            }
+            (Selector::Cgroup(_), Value::Cgroup(levels)) => {
+                parts.push(match levels.values().map(BTreeSet::len).sum::<usize>() {
+                    1 => "1 cgroup".to_owned(),
+                    n => format!("{n} cgroups"),
+                });
+            }
+            _ => {}
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
+/// The cgroups that match `patterns`, keyed by level, with an entry for every
+/// level of the patterns.
+fn cgroups(
+    patterns: &[CgroupPattern],
     root: &Path,
     dirs: &mut BTreeSet<PathBuf>,
-) -> Result<String> {
-    let paths = expand(pattern, root, dirs)?;
-    let note = match paths.len() {
-        1 => "1 cgroup".to_owned(),
-        n => format!("{n} cgroups"),
-    };
-    side.cgroups
-        .entry(pattern.level())
-        .or_default()
-        .extend(paths);
-    Ok(note)
+) -> Result<BTreeMap<usize, BTreeSet<Cgroup>>> {
+    let mut levels: BTreeMap<usize, BTreeSet<Cgroup>> = BTreeMap::new();
+    for pattern in patterns {
+        let found = expand(pattern, root, dirs)?;
+        levels.entry(pattern.level()).or_default().extend(found);
+    }
+    Ok(levels)
 }
 
 /// The existing cgroups that match `pattern`. The directories read on the way
@@ -175,12 +241,16 @@ fn expand(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::rules::parse;
 
-    fn paths(side: &Side, level: usize) -> Vec<&str> {
-        side.cgroups[&level]
-            .iter()
-            .map(|cgroup| cgroup.path.as_str())
-            .collect()
+    fn paths(resolved: &Resolved, rule: usize, level: usize) -> Vec<&str> {
+        match &resolved.matches[rule].tests[0].value {
+            Value::Cgroup(levels) => levels[&level]
+                .iter()
+                .map(|cgroup| cgroup.path.as_str())
+                .collect(),
+            value => panic!("not a cgroup test: {value:?}"),
+        }
     }
 
     #[test]
@@ -197,17 +267,17 @@ mod tests {
         fs::write(root.join("system.slice/not-a-cgroup.service"), "").unwrap();
 
         let rules =
-            crate::config::rules::parse("cgroup:/system.slice/*.service\n!cgroup:/user.slice/*\n")
+            parse("cgroup:/system.slice/*.service,/nothing/here/yet\n!cgroup:/user.slice/*\n")
                 .unwrap();
         let mut resolved = resolve(&rules, &root).unwrap();
         assert_eq!(
-            paths(&resolved.selection.include, 2),
+            paths(&resolved, 0, 2),
             ["system.slice/cron.service", "system.slice/docker.service"]
         );
-        assert_eq!(
-            paths(&resolved.selection.exclude, 2),
-            ["user.slice/user-1000.slice"]
-        );
+        // A level with patterns but no cgroup yet stays, for cgroups created
+        // later.
+        assert!(paths(&resolved, 0, 3).is_empty());
+        assert_eq!(paths(&resolved, 1, 2), ["user.slice/user-1000.slice"]);
         assert_eq!(
             resolved.notes,
             [Some("2 cgroups".to_owned()), Some("1 cgroup".to_owned())]
@@ -215,23 +285,41 @@ mod tests {
 
         fs::remove_dir_all(root.join("system.slice/docker.service")).unwrap();
         refresh_cgroups(&rules, &mut resolved, &root).unwrap();
-        assert_eq!(
-            paths(&resolved.selection.include, 2),
-            ["system.slice/cron.service"]
-        );
+        assert_eq!(paths(&resolved, 0, 2), ["system.slice/cron.service"]);
         assert_eq!(resolved.notes[0].as_deref(), Some("1 cgroup"));
 
         // A unit that restarts gets a new cgroup at the same path, which the
         // kernel table must pick up.
-        let before = resolved.selection.clone();
+        let before = resolved.matches.clone();
         fs::remove_dir_all(root.join("system.slice/cron.service")).unwrap();
         fs::create_dir_all(root.join("system.slice/cron.service")).unwrap();
         refresh_cgroups(&rules, &mut resolved, &root).unwrap();
-        assert_eq!(
-            paths(&resolved.selection.include, 2),
-            ["system.slice/cron.service"]
-        );
-        assert_ne!(resolved.selection, before);
+        assert_eq!(paths(&resolved, 0, 2), ["system.slice/cron.service"]);
+        assert_ne!(resolved.matches, before);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn overlapping_values_merge() {
+        let rules = parse("uid:1000-1999,1500-2500,2501,0\n!dst:10.0.0.0/8,10.1.0.0/16,fd00::/8\n")
+            .unwrap();
+        let resolved = resolve(&rules, Path::new("/nonexistent")).unwrap();
+        assert_eq!(
+            resolved.matches[0].tests[0].value,
+            Value::Uid(vec![
+                Span { first: 0, last: 0 },
+                Span {
+                    first: 1000,
+                    last: 2501
+                }
+            ])
+        );
+        assert_eq!(
+            resolved.matches[1].tests[0].value,
+            Value::Dst(vec![
+                "10.0.0.0/8".parse().unwrap(),
+                "fd00::/8".parse().unwrap()
+            ])
+        );
     }
 }

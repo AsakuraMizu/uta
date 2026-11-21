@@ -28,18 +28,28 @@ type Connection = rpc::Connection<Request, Response>;
 
 const RULES_HELP: &str = "\
 Rules:
-  local           every socket of this host
-  uid:USER        sockets of a user, by name or ID
-  cgroup:/PATH    processes in a cgroup or below it; * matches within one path segment
-  iif:NAME        forwarded traffic entering an interface; a trailing * matches a prefix
-  dst:ADDR[/LEN]  traffic to an address or network
-  port:PORT       traffic to a port
-  oif:NAME        traffic that routing sends out of an interface
-  !RULE           excludes what RULE matches; quote it in the shell
+A rule is conditions separated by spaces, all of which must hold; quote it in the shell. A rule
+starting with ! excludes what it matches. Traffic is captured when it matches a rule that does
+not exclude, and no rule that does. A rule that does not exclude needs a source.
 
-Traffic is captured when it matches a rule of the first four kinds, matches a rule of the
-last three kinds if there are any, and matches no excluding rule. The rules file holds one
-rule per line; # starts a comment.";
+Sources, sockets of this host:
+  local          every socket
+  uid:USERS      sockets of users, by name, ID or ID range
+  gid:GROUPS     sockets created with a group as the effective group
+  cgroup:/PATHS  processes in cgroups or below them; * matches within one path segment
+Sources, forwarded traffic:
+  iif:NAMES      entering through an interface; a trailing * matches a prefix
+  src:ADDRS      from addresses or networks
+  mac:ADDRS      from link-layer addresses
+Other conditions:
+  proto:tcp|udp
+  dst:ADDRS      to addresses or networks
+  port:PORTS     to ports or port ranges
+  oif:NAMES      that routing sends out of an interface
+
+Values separated by commas are alternatives, and kind:!VALUES negates a condition. For example,
+`!dst:10.0.0.0/8 port:!53` leaves traffic to 10.0.0.0/8 alone, except DNS. The rules file holds
+one rule per line; # starts a comment.";
 
 #[derive(Parser)]
 #[command(version, about = "Transparent proxy controller for sing-box")]
@@ -80,9 +90,9 @@ enum Command {
     },
     /// Run a command, or $SHELL, with its traffic captured
     Run {
-        /// Also capture what RULE selects while the command runs; a local,
-        /// uid:, cgroup: or iif: rule
-        #[arg(long, value_name = "RULE", value_parser = Rule::parse_source)]
+        /// Also capture what RULE selects while the command runs; a rule that
+        /// does not exclude
+        #[arg(long, value_name = "RULE", value_parser = Rule::parse_include)]
         with: Vec<Rule>,
         /// Run inside the scope `uta run` created
         #[arg(long, hide = true)]

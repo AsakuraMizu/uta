@@ -52,7 +52,7 @@ impl Daemon {
             }
         };
         let old = self.state.borrow().applied.clone();
-        let capture_changed = new.resolved.selection != old.resolved.selection;
+        let capture_changed = new.selection() != old.selection();
 
         if !singbox_changed && !capture_changed {
             self.state.borrow_mut().applied = new;

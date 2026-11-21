@@ -1,45 +1,30 @@
 //! The nftables table that selects traffic and hands it to sing-box's tproxy
 //! inbound.
 
+use std::fmt::Display;
+
 use askama::Template;
 use ipnet::IpNet;
 
 use crate::{
-    config::{Marks, Ports, rules::IfacePattern},
-    selection::{Selection, Side},
+    config::{
+        Marks, Ports,
+        rules::{IfacePattern, Origin},
+    },
+    selection::{Match, Selection, Test, Value},
 };
 
 pub const TABLE: &str = "uta";
 
 /// A script for `nft -f` that replaces uta's table in one transaction.
 pub fn ruleset(selection: &Selection, marks: &Marks, ports: &Ports) -> String {
-    let Selection { include, exclude } = selection;
     let mut sets = Vec::new();
-    sets_of(&mut sets, "include", include);
-    sets_of(&mut sets, "exclude", exclude);
-
-    let output = Hook {
-        exclude_all: exclude.local,
-        exclude: [
-            local_sources(exclude, "exclude"),
-            destinations(exclude, "exclude", HookKind::Output),
-        ]
-        .concat(),
-        include_all: include.local,
-        include: local_sources(include, "include"),
-        destinations: destinations(include, "include", HookKind::Output),
+    let mut hook = |origin| Hook {
+        exclude: statements(&selection.exclude, origin, "exclude", &mut sets),
+        include: statements(&selection.include, origin, "include", &mut sets),
     };
-    let prerouting = Hook {
-        exclude_all: false,
-        exclude: [
-            forward_sources(exclude),
-            destinations(exclude, "exclude", HookKind::Prerouting),
-        ]
-        .concat(),
-        include_all: false,
-        include: forward_sources(include),
-        destinations: destinations(include, "include", HookKind::Prerouting),
-    };
+    let output = hook(Origin::Local);
+    let prerouting = hook(Origin::Forwarded);
 
     Ruleset {
         table: TABLE,
@@ -81,114 +66,144 @@ struct Set {
     elements: Vec<String>,
 }
 
-/// The selector matchers of one hook. Excludes are checked first; a source
-/// include continues to the destination chain, which passes everything when
-/// there are no include destinations.
+/// The matchers of the rules that apply in one hook. Each excluding matcher
+/// returns; each including one sends the packet on to be captured.
 struct Hook {
-    exclude_all: bool,
     exclude: Vec<String>,
-    include_all: bool,
     include: Vec<String>,
-    destinations: Vec<String>,
 }
 
-#[derive(Clone, Copy)]
-enum HookKind {
-    Output,
-    Prerouting,
-}
-
-fn sets_of(sets: &mut Vec<Set>, side_name: &str, side: &Side) {
-    let mut add = |name: String, declaration: String, elements: Vec<String>| {
-        sets.push(Set {
-            name,
-            declaration,
-            elements,
-        });
-    };
-    if !side.uids.is_empty() {
-        add(
-            format!("uid_{side_name}"),
-            "type uid;".to_owned(),
-            side.uids.iter().map(u32::to_string).collect(),
-        );
-    }
-    for (level, cgroups) in &side.cgroups {
-        add(
-            format!("cgroup_{side_name}_{level}"),
-            format!("typeof socket cgroupv2 level {level};"),
-            cgroups.iter().map(|cgroup| quote(&cgroup.path)).collect(),
-        );
-    }
-    let (v4, v6): (Vec<&IpNet>, Vec<&IpNet>) = side
-        .nets
-        .iter()
-        .partition(|net| matches!(net, IpNet::V4(_)));
-    for (name, kind, nets) in [("dst4", "ipv4_addr", v4), ("dst6", "ipv6_addr", v6)] {
-        if !nets.is_empty() {
-            add(
-                format!("{name}_{side_name}"),
-                format!("type {kind}; flags interval; auto-merge;"),
-                nets.iter().map(ToString::to_string).collect(),
-            );
+/// The matchers for the rules in `matches` that apply to traffic of `origin`.
+/// A rule may need several, as one nft rule cannot express every rule.
+fn statements(matches: &[Match], origin: Origin, side: &str, sets: &mut Vec<Set>) -> Vec<String> {
+    let mut statements = Vec::new();
+    for (index, resolved) in matches.iter().enumerate() {
+        if resolved.origin.is_some_and(|of| of != origin) {
+            continue;
+        }
+        let name = format!("{side}{index}");
+        for matchers in alternatives(resolved, origin, &name, sets) {
+            statements.push(matchers.join(" "));
         }
     }
-    if !side.ports.is_empty() {
-        add(
-            format!("port_{side_name}"),
-            "type inet_service;".to_owned(),
-            side.ports.iter().map(u16::to_string).collect(),
-        );
-    }
+    statements
 }
 
-/// Matchers for sockets of this host, except `local`, which matches everything.
-fn local_sources(side: &Side, side_name: &str) -> Vec<String> {
-    let mut matchers = Vec::new();
-    if !side.uids.is_empty() {
-        matchers.push(format!("meta skuid @uid_{side_name}"));
+/// The alternatives, each a list of matchers that must all hold, that
+/// together match what `resolved` matches.
+fn alternatives(
+    resolved: &Match,
+    origin: Origin,
+    name: &str,
+    sets: &mut Vec<Set>,
+) -> Vec<Vec<String>> {
+    let mut alternatives = families(&resolved.tests);
+    for test in &resolved.tests {
+        let not = if test.negated { "!= " } else { "" };
+        let matcher = match &test.value {
+            // Every packet in the output hook comes from a socket of this host.
+            Value::Local => continue,
+            // In the alternatives already, one for each address family.
+            Value::Src(_) | Value::Dst(_) => continue,
+            Value::Cgroup(levels) => {
+                // `socket cgroupv2 level N` tests one level of the socket's
+                // cgroup, so cgroups of several levels need a set and a test
+                // each: any of them for a condition, none for a negated one.
+                let mut per_level = Vec::new();
+                for (level, cgroups) in levels {
+                    let set = format!("{name}_cgroup{level}");
+                    sets.push(Set {
+                        name: set.clone(),
+                        declaration: format!("typeof socket cgroupv2 level {level};"),
+                        elements: cgroups.iter().map(|cgroup| quote(&cgroup.path)).collect(),
+                    });
+                    per_level.push(format!("socket cgroupv2 level {level} {not}@{set}"));
+                }
+                if test.negated {
+                    for alternative in &mut alternatives {
+                        alternative.extend(per_level.iter().cloned());
+                    }
+                } else {
+                    alternatives = alternatives
+                        .iter()
+                        .flat_map(|alternative| {
+                            per_level.iter().map(move |matcher| {
+                                let mut alternative = alternative.clone();
+                                alternative.push(matcher.clone());
+                                alternative
+                            })
+                        })
+                        .collect();
+                }
+                continue;
+            }
+            Value::Uid(spans) => format!("meta skuid {not}{}", anonymous(spans)),
+            Value::Gid(spans) => format!("meta skgid {not}{}", anonymous(spans)),
+            Value::Iif(patterns) => format!("iifname {not}{}", names(patterns)),
+            Value::Mac(macs) => format!("ether saddr {not}{}", anonymous(macs)),
+            Value::Proto(protos) => format!("meta l4proto {not}{}", anonymous(protos)),
+            Value::Port(spans) => format!("th dport {not}{}", anonymous(spans)),
+            Value::Oif(patterns) => match origin {
+                // The output hook has no fib oif lookup; meta oifname is the
+                // device chosen by the routing decision made before uta
+                // reroutes the packet.
+                Origin::Local => format!("oifname {not}{}", names(patterns)),
+                Origin::Forwarded => format!("fib daddr oifname {not}{}", names(patterns)),
+            },
+        };
+        for alternative in &mut alternatives {
+            alternative.push(matcher.clone());
+        }
     }
-    for level in side.cgroups.keys() {
-        matchers.push(format!(
-            "socket cgroupv2 level {level} @cgroup_{side_name}_{level}"
-        ));
-    }
-    matchers
+    alternatives
 }
 
-fn forward_sources(side: &Side) -> Vec<String> {
-    if side.iifs.is_empty() {
-        Vec::new()
-    } else {
-        vec![format!("iifname {}", ifname_set(&side.iifs))]
+/// One alternative per address family that the address tests of `tests` can
+/// match, with those tests; one alternative without matchers if there are no
+/// address tests.
+fn families(tests: &[Test]) -> Vec<Vec<String>> {
+    let addresses: Vec<(&Test, &str, &[IpNet])> = tests
+        .iter()
+        .filter_map(|test| match &test.value {
+            Value::Src(nets) => Some((test, "saddr", nets.as_slice())),
+            Value::Dst(nets) => Some((test, "daddr", nets.as_slice())),
+            _ => None,
+        })
+        .collect();
+    if addresses.is_empty() {
+        return vec![Vec::new()];
     }
+    let mut alternatives = Vec::new();
+    'family: for (family, field) in [("ipv4", "ip"), ("ipv6", "ip6")] {
+        let mut matchers = vec![format!("meta nfproto {family}")];
+        for (test, direction, nets) in &addresses {
+            let nets: Vec<&IpNet> = nets
+                .iter()
+                .filter(|net| matches!(net, IpNet::V4(_)) == (family == "ipv4"))
+                .collect();
+            match (nets.is_empty(), test.negated) {
+                // No address of this family can match.
+                (true, false) => continue 'family,
+                // Every address of this family is outside the list.
+                (true, true) => {}
+                (false, negated) => matchers.push(format!(
+                    "{field} {direction} {}{}",
+                    if negated { "!= " } else { "" },
+                    anonymous(&nets)
+                )),
+            }
+        }
+        alternatives.push(matchers);
+    }
+    alternatives
 }
 
-fn destinations(side: &Side, side_name: &str, hook: HookKind) -> Vec<String> {
-    let mut matchers = Vec::new();
-    if side.nets.iter().any(|net| matches!(net, IpNet::V4(_))) {
-        matchers.push(format!("ip daddr @dst4_{side_name}"));
-    }
-    if side.nets.iter().any(|net| matches!(net, IpNet::V6(_))) {
-        matchers.push(format!("ip6 daddr @dst6_{side_name}"));
-    }
-    if !side.ports.is_empty() {
-        matchers.push(format!("th dport @port_{side_name}"));
-    }
-    if !side.oifs.is_empty() {
-        let set = ifname_set(&side.oifs);
-        matchers.push(match hook {
-            // The output hook has no fib oif lookup; meta oifname is the device
-            // chosen by the routing decision made before uta reroutes the
-            // packet.
-            HookKind::Output => format!("oifname {set}"),
-            HookKind::Prerouting => format!("fib daddr oifname {set}"),
-        });
-    }
-    matchers
+fn anonymous<T: Display>(items: &[T]) -> String {
+    let items: Vec<String> = items.iter().map(ToString::to_string).collect();
+    format!("{{ {} }}", items.join(", "))
 }
 
-fn ifname_set(patterns: &[IfacePattern]) -> String {
+fn names(patterns: &[IfacePattern]) -> String {
     let names: Vec<String> = patterns.iter().map(|p| quote(p.as_str())).collect();
     format!("{{ {} }}", names.join(", "))
 }

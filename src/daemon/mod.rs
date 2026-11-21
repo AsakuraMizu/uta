@@ -38,7 +38,7 @@ use crate::{
     kernel::{Kernel, netlink},
     rpc::{self, Executable, Request, Response, RuleStatus, RunStatus, Status},
     selection::{
-        CGROUP_ROOT, Cgroup, Selection,
+        CGROUP_ROOT, Cgroup, Match, Selection,
         resolve::{self, Resolved},
         watch::Watcher,
     },
@@ -126,6 +126,15 @@ struct Applied {
     resolved: Resolved,
 }
 
+impl Applied {
+    fn selection(&self) -> Selection {
+        let mut selection = Selection::default();
+        self.resolved.add_to(&self.rules, &mut selection);
+        selection.normalize();
+        selection
+    }
+}
+
 struct Operation {
     kind: &'static str,
     deadline: Option<Instant>,
@@ -159,7 +168,10 @@ pub async fn run(options: Options) -> Result<()> {
     )?);
     let started = async {
         wait_ready(&process, 0).await?;
-        kernel.install(&resolved.selection, &config).await?;
+        let mut selection = Selection::default();
+        resolved.add_to(&rules, &mut selection);
+        selection.normalize();
+        kernel.install(&selection, &config).await?;
         bind(&paths.socket)
     }
     .await;
@@ -314,7 +326,7 @@ impl Daemon {
                 let pid = peer.context("failed to identify the client")?;
                 let with = with
                     .iter()
-                    .map(|rule| Rule::parse_source(rule))
+                    .map(|rule| Rule::parse_include(rule))
                     .collect::<Result<_, _>>()?;
                 self.add_run(pid, with).await?;
                 connection.send(Response::Captured).await?;
@@ -404,19 +416,13 @@ impl Daemon {
     fn selection(&self) -> Selection {
         let state = self.state.borrow();
         let rules = state.trial.as_ref().unwrap_or(&state.applied);
-        let mut selection = rules.resolved.selection.clone();
+        let mut selection = Selection::default();
+        rules.resolved.add_to(&rules.rules, &mut selection);
         for run in &state.runs {
-            let level = run.cgroup.path.split('/').count();
-            selection
-                .include
-                .cgroups
-                .entry(level)
-                .or_default()
-                .insert(run.cgroup.clone());
-            selection
-                .include
-                .extend_sources(&run.resolved.selection.include);
+            selection.include.push(Match::cgroup(&run.cgroup));
+            run.resolved.add_to(&run.with, &mut selection);
         }
+        selection.normalize();
         selection
     }
 

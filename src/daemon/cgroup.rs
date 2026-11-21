@@ -8,7 +8,7 @@ use compio::time::sleep;
 use super::{Daemon, Run, State};
 use crate::{
     config::rules::Rule,
-    selection::{CGROUP_ROOT, Cgroup, resolve},
+    selection::{CGROUP_ROOT, Cgroup, Test, Value, resolve},
 };
 
 /// How long to collect cgroup changes before acting on them, so that a burst of
@@ -16,22 +16,26 @@ use crate::{
 const SETTLE: Duration = Duration::from_millis(100);
 
 impl Daemon {
-    /// Whether a cgroup the daemon captures holds the client `pid`, so that a
-    /// new scope for it would capture nothing more.
+    /// Whether a cgroup the daemon captures without further conditions holds
+    /// the client `pid`, so that a new scope for it would capture nothing
+    /// more.
     pub(super) fn covers(&self, pid: i32) -> Result<bool> {
         let path = client_cgroup(pid)?;
         let within = |cgroup: &Cgroup| {
             path.strip_prefix(&cgroup.path)
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
         };
-        let selection = self.selection();
-        let state = self.state.borrow();
-        Ok(state.runs.iter().any(|run| within(&run.cgroup))
-            || selection.include.cgroups.values().flatten().any(within))
+        Ok(self.selection().include.iter().any(|resolved| {
+            matches!(
+                resolved.tests.as_slice(),
+                [Test { negated: false, value: Value::Cgroup(levels) }]
+                    if levels.values().flatten().any(within)
+            )
+        }))
     }
 
-    /// Captures the cgroup of the client `pid`, and what the source rules
-    /// `with` select, until the cgroup holds no process.
+    /// Captures the cgroup of the client `pid`, and what the rules `with`
+    /// select, until the cgroup holds no process.
     pub(super) async fn add_run(&self, pid: i32, with: Vec<Rule>) -> Result<()> {
         let path = client_cgroup(pid)?;
         let root = Path::new(CGROUP_ROOT);

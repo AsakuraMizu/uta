@@ -46,7 +46,7 @@ fn print(status: &Status) {
         if run.with.is_empty() {
             println!("uta run: {}", run.cgroup);
         } else {
-            println!("uta run: {}, with {}", run.cgroup, run.with.join(" "));
+            println!("uta run: {}, with {}", run.cgroup, run.with.join(", "));
         }
     }
     if let Some(operation) = &status.operation {

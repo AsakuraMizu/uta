@@ -12,46 +12,72 @@ use std::{
 
 use ipnet::IpNet;
 
-use crate::config::rules::IfacePattern;
+use crate::config::rules::{IfacePattern, Mac, Origin, Proto, Span};
 
 pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
+/// The resolved rules, sorted and without duplicates, so that equal
+/// selections capture the same traffic.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Selection {
-    pub include: Side,
-    pub exclude: Side,
+    pub include: Vec<Match>,
+    pub exclude: Vec<Match>,
 }
 
-/// Selectors of one sign, with user names already mapped to IDs and cgroup
-/// patterns to the cgroups that currently match them.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Side {
-    pub local: bool,
-    pub uids: BTreeSet<u32>,
-    /// Cgroups keyed by level. A level that has patterns but no matching
-    /// cgroup keeps an empty entry, so that its set exists for cgroups created
-    /// later.
-    pub cgroups: BTreeMap<usize, BTreeSet<Cgroup>>,
-    pub iifs: Vec<IfacePattern>,
-    pub nets: Vec<IpNet>,
-    pub ports: BTreeSet<u16>,
-    pub oifs: Vec<IfacePattern>,
-}
-
-impl Side {
-    /// Adds the sources `other` selects: its local, uid, cgroup and incoming
-    /// interface selectors.
-    pub fn extend_sources(&mut self, other: &Self) {
-        self.local |= other.local;
-        self.uids.extend(&other.uids);
-        for (level, cgroups) in &other.cgroups {
-            self.cgroups
-                .entry(*level)
-                .or_default()
-                .extend(cgroups.iter().cloned());
+impl Selection {
+    pub fn normalize(&mut self) {
+        for matches in [&mut self.include, &mut self.exclude] {
+            matches.sort();
+            matches.dedup();
         }
-        self.iifs.extend(other.iifs.iter().cloned());
     }
+}
+
+/// A rule with user and group names mapped to IDs and cgroup patterns to the
+/// cgroups that currently match them. Every test must hold.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Match {
+    pub origin: Option<Origin>,
+    pub tests: Vec<Test>,
+}
+
+impl Match {
+    /// Sockets of processes in `cgroup` or below it.
+    pub fn cgroup(cgroup: &Cgroup) -> Self {
+        let level = cgroup.path.split('/').count();
+        Self {
+            origin: Some(Origin::Local),
+            tests: vec![Test {
+                negated: false,
+                value: Value::Cgroup(BTreeMap::from([(level, BTreeSet::from([cgroup.clone()]))])),
+            }],
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Test {
+    pub negated: bool,
+    pub value: Value,
+}
+
+/// What a test matches. Ranges and networks are merged where they overlap.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Value {
+    Local,
+    Uid(Vec<Span<u32>>),
+    Gid(Vec<Span<u32>>),
+    /// Cgroups keyed by level. Every level of the patterns has an entry, empty
+    /// if nothing matches now, so that the table has a set for cgroups created
+    /// later.
+    Cgroup(BTreeMap<usize, BTreeSet<Cgroup>>),
+    Iif(Vec<IfacePattern>),
+    Src(Vec<IpNet>),
+    Mac(Vec<Mac>),
+    Proto(Vec<Proto>),
+    Dst(Vec<IpNet>),
+    Port(Vec<Span<u16>>),
+    Oif(Vec<IfacePattern>),
 }
 
 /// A cgroup by its path relative to the cgroup root, without `"` or control
