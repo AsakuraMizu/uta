@@ -17,7 +17,7 @@ uta 是 sing-box 的透明代理控制器：一个二进制，`uta daemon` 负�
 
 - 已经带 fwmark 的包不接管；sing-box 自身流量、用户出站的 `routing_mark` 和其他打 mark 的软件都靠这一条避免回环。
 - 是否接管在连接建立时决定一次，之后靠 ct mark 延续；改规则只影响新连接。
-- 本机故障（uta 或 sing-box 退出）撤掉接管，流量恢复直连；上游故障让被接管的请求失败，不回退到直连。
+- uta 退出时（包括因 sing-box 退出而 shutdown）清理自己的全部内核状态。sing-box 在运行而上游失败时，被接管的请求失败，uta 不把它改道直连。
 - 磁盘上不记事务状态，内核状态随时能由配置重建；daemon 启动先 cleanup。cleanup 按 nft 表名和 protocol 号删除，不读配置。
 - daemon 只依赖 `CAP_NET_ADMIN` 和 `CAP_NET_BIND_SERVICE`；后者不能省，透明 UDP 回包要绑定原目标的低端口（53、443）。
 
