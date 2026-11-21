@@ -179,7 +179,8 @@ fn kernel_objects(node: &str) -> (usize, usize, usize) {
 }
 
 /// Starts uta on the workstation as alice deploys it, with `rules` and the test
-/// sing-box configuration.
+/// sing-box configuration. The unit reports readiness once traffic is
+/// captured, so `systemctl start` returns only then.
 fn start_workstation(rules: &str) {
     start_workstation_with(rules, SING_BOX_CONFIG);
 }
@@ -209,9 +210,7 @@ fn start_workstation_with(rules: &str, sing_box_config: &str) {
         As::Alice,
         "systemctl --user reset-failed uta 2>/dev/null; systemctl --user start uta",
     );
-    wait_until("uta reports status", Duration::from_secs(20), || {
-        uta(As::Alice, "status").status.success()
-    });
+    assert!(uta(As::Alice, "status").status.success());
 }
 
 fn stop_workstation() {
@@ -635,9 +634,7 @@ fn start_router_with(rules: &str, sing_box_config: &str) {
         As::Root,
         "systemctl reset-failed uta 2>/dev/null; systemctl start uta",
     );
-    wait_until("uta reports status", Duration::from_secs(20), || {
-        sh("router", As::Root, "uta status").status.success()
-    });
+    assert!(sh("router", As::Root, "uta status").status.success());
 }
 
 fn stop_router() {

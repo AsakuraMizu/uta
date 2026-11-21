@@ -7,9 +7,13 @@ mod cgroup;
 use std::{
     cell::{Cell, RefCell},
     fs, io,
-    os::unix::{
-        fs::PermissionsExt,
-        net::{SocketAddr, UnixListener as StdListener, UnixStream as StdStream},
+    os::{
+        linux::net::SocketAddrExt,
+        unix::{
+            ffi::OsStrExt,
+            fs::PermissionsExt,
+            net::{SocketAddr, UnixDatagram, UnixListener as StdListener, UnixStream as StdStream},
+        },
     },
     path::{Path, PathBuf},
     rc::Rc,
@@ -172,7 +176,9 @@ pub async fn run(options: Options) -> Result<()> {
         resolved.add_to(&rules, &mut selection);
         selection.normalize();
         kernel.install(&selection, &config).await?;
-        bind(&paths.socket)
+        let listener = bind(&paths.socket)?;
+        notify_ready()?;
+        Ok(listener)
     }
     .await;
     let listener = match started {
@@ -510,4 +516,20 @@ fn bind(path: &Path) -> Result<UnixListener> {
         .with_context(|| format!("failed to listen on {}", path.display()))?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o660))?;
     Ok(UnixListener::from_std(listener)?)
+}
+
+/// Tells systemd that the daemon is ready, if it runs the daemon as a
+/// `Type=notify` service (sd_notify(3)).
+fn notify_ready() -> Result<()> {
+    let Some(path) = std::env::var_os("NOTIFY_SOCKET") else {
+        return Ok(());
+    };
+    let address = match path.as_bytes().strip_prefix(b"@") {
+        Some(name) => SocketAddr::from_abstract_name(name)?,
+        None => SocketAddr::from_pathname(&path)?,
+    };
+    UnixDatagram::unbound()?
+        .send_to_addr(b"READY=1", &address)
+        .with_context(|| format!("failed to notify systemd at {}", path.display()))?;
+    Ok(())
 }

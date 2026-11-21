@@ -61,7 +61,9 @@ impl Process {
             .arg("-D")
             .arg(work_dir)
             // A terminal's Ctrl+C reaches uta, which stops sing-box after removing its rules.
-            .process_group(0);
+            .process_group(0)
+            // Readiness is the daemon's to report.
+            .env_remove("NOTIFY_SOCKET");
         // Converting a `Stdio` cannot fail.
         let Ok(command) = command.stdin(Stdio::null());
         let Ok(command) = command.stdout(Stdio::null());

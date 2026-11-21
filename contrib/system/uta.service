@@ -3,6 +3,8 @@ Description=uta transparent proxy
 After=network.target
 
 [Service]
+# uta reports readiness once traffic is captured.
+Type=notify
 User=uta
 Group=uta
 ExecStart=/usr/bin/uta daemon --config /etc/uta/uta.toml --rules /etc/uta/rules --runtime-dir /run/uta
