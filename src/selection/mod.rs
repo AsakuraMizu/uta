@@ -77,6 +77,7 @@ pub enum Value {
     Proto(Vec<Proto>),
     Dst(Vec<IpNet>),
     Port(Vec<Span<u16>>),
+    Sport(Vec<Span<u16>>),
     Oif(Vec<IfacePattern>),
 }
 

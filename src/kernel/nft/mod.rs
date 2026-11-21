@@ -143,6 +143,7 @@ fn alternatives(
             Value::Mac(macs) => format!("ether saddr {not}{}", anonymous(macs)),
             Value::Proto(protos) => format!("meta l4proto {not}{}", anonymous(protos)),
             Value::Port(spans) => format!("th dport {not}{}", anonymous(spans)),
+            Value::Sport(spans) => format!("th sport {not}{}", anonymous(spans)),
             Value::Oif(patterns) => match origin {
                 // The output hook has no fib oif lookup; meta oifname is the
                 // device chosen by the routing decision made before uta

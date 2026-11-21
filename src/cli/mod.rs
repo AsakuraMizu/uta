@@ -45,6 +45,7 @@ Other conditions:
   proto:tcp|udp
   dst:ADDRS      to addresses or networks
   port:PORTS     to ports or port ranges
+  sport:PORTS    from ports or port ranges
   oif:NAMES      that routing sends out of an interface
 
 Values separated by commas are alternatives, and kind:!VALUES negates a condition. For example,

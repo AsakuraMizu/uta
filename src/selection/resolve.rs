@@ -104,6 +104,7 @@ fn value(selector: &Selector, root: &Path, dirs: &mut BTreeSet<PathBuf>) -> Resu
         Selector::Proto(protos) => Value::Proto(protos.clone()),
         Selector::Dst(nets) => Value::Dst(IpNet::aggregate(nets)),
         Selector::Port(ports) => Value::Port(merge(ports.clone())),
+        Selector::Sport(ports) => Value::Sport(merge(ports.clone())),
         Selector::Oif(patterns) => Value::Oif(patterns.clone()),
     })
 }

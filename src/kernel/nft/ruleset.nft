@@ -10,6 +10,16 @@ table inet {{ table }} {
 	}
 {%- endfor %}
 
+	# A datagram that arrives for a client from an address it did not send to is written back by
+	# sing-box from that address, which is not one of this host's. It starts no connection of this
+	# host: tracked, it would be captured again by the rules, and the client's answer would match
+	# it as a reply and leave without passing through sing-box. Untracked, it is not captured, and
+	# the answer is new traffic of the client.
+	chain output_raw {
+		type filter hook output priority raw; policy accept;
+		meta l4proto udp fib saddr type != local notrack
+	}
+
 	chain output {
 		type route hook output priority mangle; policy accept;
 		meta l4proto != { tcp, udp } return

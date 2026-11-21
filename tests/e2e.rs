@@ -682,7 +682,7 @@ fn captures_forwarded_traffic() {
 }
 
 #[test]
-fn forwarded_traffic_by_source_address_or_mac() {
+fn forwarded_traffic_by_source() {
     let _topology = lock();
     start_router("src:192.168.10.2\n");
     assert_eq!(seen("client", As::Root, ORIGIN), RELAY);
@@ -697,6 +697,46 @@ fn forwarded_traffic_by_source_address_or_mac() {
     assert_eq!(seen("client", As::Root, ORIGIN), RELAY);
     start_router("mac:02:00:5e:10:00:01\n");
     assert_eq!(seen("client", As::Root, ORIGIN), CLIENT);
+
+    start_router("iif:eth2\n!proto:udp sport:5555\n");
+    assert_eq!(
+        seen_udp("client", As::Root, "UDP4:10.0.4.2:9,bind=:5555"),
+        CLIENT
+    );
+    assert_eq!(seen_udp("client", As::Root, "UDP4:10.0.4.2:9"), RELAY);
+    stop_router();
+}
+
+#[test]
+fn datagrams_from_other_ports_reach_the_client_from_there() {
+    let _topology = lock();
+    let mut config: serde_json::Value = serde_json::from_str(SING_BOX_CONFIG).unwrap();
+    config["route"]["rules"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({ "port": 10, "outbound": "direct" }));
+    // With local, uta also captures the sockets of sing-box itself.
+    start_router_with("iif:eth2\nlocal\n", &config.to_string());
+    // Origin answers a datagram to port 10 from port 11; sing-box passes the
+    // answer on from where it came. The client's datagram back to port 11
+    // goes through sing-box too, instead of leaving as an answer to it.
+    let answer = ok(
+        "client",
+        As::Root,
+        r#"python3 -c '
+import socket
+client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+client.settimeout(3)
+client.sendto(b"x", ("10.0.4.2", 10))
+_, source = client.recvfrom(64)
+client.sendto(b"x", source)
+seen, _ = client.recvfrom(64)
+print(f"{source[0]}:{source[1]} {seen.decode()}")
+'"#,
+    );
+    let (source, seen) = answer.split_once(' ').unwrap();
+    assert_eq!(source, "10.0.4.2:11");
+    assert_ne!(seen, CLIENT);
     stop_router();
 }
 

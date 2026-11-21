@@ -47,6 +47,8 @@ pub enum Selector {
     Dst(Vec<IpNet>),
     /// Traffic to a destination port.
     Port(Vec<Span<u16>>),
+    /// Traffic from a source port.
+    Sport(Vec<Span<u16>>),
     /// Traffic that normal routing sends out through a matching interface.
     Oif(Vec<IfacePattern>),
 }
@@ -251,6 +253,7 @@ impl Selector {
             Self::Proto(_) => "proto",
             Self::Dst(_) => "dst",
             Self::Port(_) => "port",
+            Self::Sport(_) => "sport",
             Self::Oif(_) => "oif",
         }
     }
@@ -268,7 +271,8 @@ impl Selector {
             Self::Proto(_) => 7,
             Self::Dst(_) => 8,
             Self::Port(_) => 9,
-            Self::Oif(_) => 10,
+            Self::Sport(_) => 10,
+            Self::Oif(_) => 11,
         }
     }
 
@@ -277,7 +281,7 @@ impl Selector {
         match self {
             Self::Local | Self::Uid(_) | Self::Gid(_) | Self::Cgroup(_) => Some(Origin::Local),
             Self::Iif(_) | Self::Src(_) | Self::Mac(_) => Some(Origin::Forwarded),
-            Self::Proto(_) | Self::Dst(_) | Self::Port(_) | Self::Oif(_) => None,
+            Self::Proto(_) | Self::Dst(_) | Self::Port(_) | Self::Sport(_) | Self::Oif(_) => None,
         }
     }
 }
@@ -294,7 +298,7 @@ impl FromStr for Condition {
                     selector: Selector::Local,
                 }),
                 "uid" | "gid" | "cgroup" | "iif" | "src" | "mac" | "proto" | "dst" | "port"
-                | "oif" => invalid(format!("`{s}` needs a value, as in `{s}:VALUE`")),
+                | "sport" | "oif" => invalid(format!("`{s}` needs a value, as in `{s}:VALUE`")),
                 _ => invalid(format!("unknown condition `{s}`")),
             };
         };
@@ -322,6 +326,7 @@ impl FromStr for Condition {
             })?),
             "dst" => Selector::Dst(list(values, parse_net)?),
             "port" => Selector::Port(list(values, parse_port)?),
+            "sport" => Selector::Sport(list(values, parse_port)?),
             "oif" => Selector::Oif(list(values, parse_iface)?),
             _ => return invalid(format!("unknown condition kind `{kind}`")),
         };
@@ -524,7 +529,7 @@ impl fmt::Display for Condition {
             Selector::Src(nets) | Selector::Dst(nets) => join(f, nets.iter().map(Net)),
             Selector::Mac(macs) => join(f, macs),
             Selector::Proto(protos) => join(f, protos),
-            Selector::Port(ports) => join(f, ports),
+            Selector::Port(ports) | Selector::Sport(ports) => join(f, ports),
         }
     }
 }
@@ -715,6 +720,10 @@ mod tests {
         assert_eq!(rule("!port:443,1-1023").to_string(), "!port:1-1023,443");
         assert!(error("!port:0").contains("between 1 and 65535"));
         assert!(error("!port:9-8").contains("empty range"));
+        assert_eq!(
+            rule("!sport:41641 iif:eth0 proto:udp").to_string(),
+            "!iif:eth0 proto:udp sport:41641"
+        );
     }
 
     #[test]
