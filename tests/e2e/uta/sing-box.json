@@ -10,7 +10,6 @@
   ],
   "route": {
     "rules": [
-      { "inbound": "uta-dns", "action": "hijack-dns" },
       { "port": 53, "action": "hijack-dns" }
     ],
     "final": "relay"

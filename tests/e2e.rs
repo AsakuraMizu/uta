@@ -261,6 +261,12 @@ fn dns_of_captured_sockets_reaches_sing_box() {
     start_workstation("uid:alice\n!dst:127.0.0.53\n");
     assert_eq!(resolve("workstation", As::Alice, "127.0.0.53"), DIRECT);
     assert_eq!(resolve("workstation", As::Alice, "10.0.4.2"), PROXIED);
+
+    // Traffic without DNS.
+    start_workstation("uid:alice\n!port:53\n");
+    assert_eq!(resolve("workstation", As::Alice, "127.0.0.53"), DIRECT);
+    assert_eq!(resolve("workstation", As::Alice, "10.0.4.2"), DIRECT);
+    assert_eq!(seen("workstation", As::Alice, ORIGIN), RELAY);
     stop_workstation();
 }
 

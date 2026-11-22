@@ -39,7 +39,12 @@ pub fn fragment(ports: &Ports, marks: &Marks) -> Value {
             // Queries redirected in prerouting arrive at an address of the incoming interface.
             { "type": "direct", "tag": DNS_INBOUND, "listen": "::", "listen_port": ports.dns },
         ],
-        "route": { "default_mark": marks.mask },
+        "route": {
+            "default_mark": marks.mask,
+            // Queries redirected to uta's DNS inbound have no other destination than
+            // sing-box's DNS. Arrays merge in file order, so this rule comes first.
+            "rules": [{ "inbound": DNS_INBOUND, "action": "hijack-dns" }],
+        },
         // uta detects startup from the log on sing-box's standard streams.
         "log": { "disabled": false, "output": "" },
     })
