@@ -2,6 +2,7 @@
 //! to the daemon over its control socket.
 
 mod apply;
+mod complete;
 mod run;
 mod status;
 
@@ -12,7 +13,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap_complete::{ArgValueCompleter, CompleteEnv};
 use compio::net::UnixStream;
 use futures_util::{SinkExt, StreamExt};
 
@@ -70,7 +72,7 @@ enum Command {
     /// Add rules to the rules file and apply them
     #[command(after_help = RULES_HELP)]
     Add {
-        #[arg(required = true, value_name = "RULE")]
+        #[arg(required = true, value_name = "RULE", add = ArgValueCompleter::new(complete::rule))]
         rules: Vec<Rule>,
         #[command(flatten)]
         confirm: Confirmation,
@@ -78,7 +80,11 @@ enum Command {
     /// Remove rules from the rules file and apply the result
     #[command(after_help = RULES_HELP)]
     Del {
-        #[arg(required = true, value_name = "RULE")]
+        #[arg(
+            required = true,
+            value_name = "RULE",
+            add = ArgValueCompleter::new(complete::existing_rule)
+        )]
         rules: Vec<Rule>,
         #[command(flatten)]
         confirm: Confirmation,
@@ -97,7 +103,12 @@ enum Command {
     Run {
         /// Also capture what RULE selects while the command runs; a rule that
         /// does not exclude
-        #[arg(long, value_name = "RULE", value_parser = Rule::parse_include)]
+        #[arg(
+            long,
+            value_name = "RULE",
+            value_parser = Rule::parse_include,
+            add = ArgValueCompleter::new(complete::rule)
+        )]
         with: Vec<Rule>,
         /// Run inside the scope `uta run` created
         #[arg(long, hide = true)]
@@ -151,6 +162,9 @@ impl From<Confirmation> for apply::Confirmation {
 }
 
 pub fn main() -> ExitCode {
+    // With COMPLETE set, prints the shell's completion code or candidates, and
+    // exits.
+    CompleteEnv::with_factory(Cli::command).complete();
     let cli = Cli::parse();
     let runtime = match compio::runtime::Runtime::new() {
         Ok(runtime) => runtime,

@@ -438,6 +438,24 @@ fn add_and_del_match_rules_by_meaning() {
 }
 
 #[test]
+fn completion_offers_the_rules_to_delete() {
+    let _topology = lock();
+    start_workstation("uid:alice\n!dst:10.0.0.0/8 port:!53\n");
+    let candidates = ok(
+        "workstation",
+        As::Alice,
+        &format!("COMPLETE=fish {UTA} -- uta del ''"),
+    );
+    let candidates: Vec<&str> = candidates.lines().collect();
+    assert!(candidates.contains(&"uid:alice"), "{candidates:?}");
+    assert!(
+        candidates.contains(&"!dst:10.0.0.0/8 port:!53"),
+        "{candidates:?}"
+    );
+    stop_workstation();
+}
+
+#[test]
 fn changes_to_capture_need_confirmation() {
     let _topology = lock();
     start_workstation("uid:alice\n");
