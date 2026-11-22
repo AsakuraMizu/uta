@@ -154,7 +154,7 @@ pub fn main() -> ExitCode {
 async fn run(cli: Cli) -> Result<bool> {
     let socket = || socket_path(cli.socket.clone());
     match cli.command {
-        Command::Status => status::status(&socket()).await.map(|()| true),
+        Command::Status => status::status(&socket()).await,
         Command::Add { rules, confirm } => {
             apply::apply(&socket(), Change::Add(rules), confirm.yes, confirm.timeout).await
         }

@@ -89,6 +89,8 @@ pub struct Status {
     pub rules_changed: bool,
     /// The sing-box configuration files differ from the ones last applied.
     pub singbox_changed: bool,
+    /// What uta installed in the kernel and is no longer there.
+    pub missing: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

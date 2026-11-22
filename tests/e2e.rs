@@ -308,6 +308,29 @@ fn gid_selects_sockets_of_a_group() {
 }
 
 #[test]
+fn kernel_state_removed_by_another_program() {
+    let _topology = lock();
+    start_workstation("uid:alice\n");
+    // systemd-networkd removes rules it did not configure when it starts.
+    ok(
+        "workstation",
+        As::Root,
+        "ip rule del priority 5201; ip -6 rule del priority 5201; ip route flush table 7500; ip \
+         -6 route flush table 7500",
+    );
+    wait_until(
+        "uta puts policy routing back",
+        Duration::from_secs(5),
+        || seen("workstation", As::Alice, ORIGIN) == RELAY,
+    );
+    assert!(uta(As::Alice, "status").status.success());
+
+    ok("workstation", As::Root, "nft delete table inet uta");
+    assert!(!uta(As::Alice, "status").status.success());
+    stop_workstation();
+}
+
+#[test]
 fn cgroup_rules_follow_units_that_restart() {
     let _topology = lock();
     start_workstation("cgroup:/system.slice/uta-probe.service\n");

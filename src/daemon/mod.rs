@@ -27,19 +27,22 @@ use compio::{
     signal::unix::signal,
     time::{sleep, timeout},
 };
-use futures_channel::oneshot;
+use futures_channel::{mpsc::UnboundedReceiver, oneshot};
 use futures_util::{FutureExt, SinkExt, StreamExt, lock::Mutex, pin_mut, select};
+use netlink_packet_route::RouteNetlinkMessage;
+use netlink_sys::SocketAddr as NetlinkAddr;
 use nix::sys::{
     signal::Signal,
     socket::{getsockopt, sockopt::PeerCredentials},
 };
+use rtnetlink::packet_core::NetlinkMessage;
 
 use crate::{
     config::{
         Config, SingBox,
         rules::{self, Rule},
     },
-    kernel::{Kernel, netlink},
+    kernel::{self, Kernel, netlink},
     rpc::{self, Executable, Request, Response, RuleStatus, RunStatus, Status},
     selection::{
         CGROUP_ROOT, Cgroup, Match, Selection,
@@ -159,6 +162,7 @@ pub async fn run(options: Options) -> Result<()> {
     let rules =
         rules::parse(&text).with_context(|| format!("invalid {}", options.rules.display()))?;
     let resolved = resolve::resolve(&rules, Path::new(CGROUP_ROOT))?;
+    let routing = netlink::watch_routing().context("failed to watch policy routing")?;
     let watcher = Watcher::new().context("failed to watch the cgroup tree")?;
     watcher.set_dirs(&resolved.dirs);
     let paths = Paths::new(&std::path::absolute(&options.runtime_dir)?);
@@ -216,6 +220,7 @@ pub async fn run(options: Options) -> Result<()> {
     });
     daemon.watch(&process);
     spawn(Rc::clone(&daemon).track()).detach();
+    spawn(Rc::clone(&daemon).keep_routes(routing)).detach();
     let served = daemon.serve(listener, fatal_receiver).await;
     let stopped = daemon.shutdown().await;
     served.and(stopped)
@@ -318,7 +323,10 @@ impl Daemon {
             _ => bail!("expected a hello"),
         }
         match connection.next().await {
-            Some(Ok(Request::Status)) => connection.send(Response::Status(self.status())).await?,
+            Some(Ok(Request::Status)) => {
+                let status = self.status().await;
+                connection.send(Response::Status(status)).await?;
+            }
             Some(Ok(Request::Apply {
                 rules,
                 confirm_secs,
@@ -343,7 +351,38 @@ impl Daemon {
         Ok(())
     }
 
-    fn status(&self) -> Status {
+    /// Puts back the policy routing whenever another program removes it, as
+    /// systemd-networkd does to rules it did not configure when it starts.
+    async fn keep_routes(
+        self: Rc<Self>,
+        mut messages: UnboundedReceiver<(NetlinkMessage<RouteNetlinkMessage>, NetlinkAddr)>,
+    ) {
+        while let Some((message, _)) = messages.next().await {
+            // Handle a burst of deletions at once.
+            let mut removed = kernel::removes_ours(&message);
+            while let Ok((message, _)) = messages.try_recv() {
+                removed |= kernel::removes_ours(&message);
+            }
+            if !removed {
+                continue;
+            }
+            match self.kernel.lock().await.restore_routes(&self.config).await {
+                Ok(0) => {}
+                Ok(restored) => {
+                    eprintln!(
+                        "put back policy routing another program removed ({restored} entries)"
+                    );
+                }
+                Err(error) => eprintln!("{error:#}"),
+            }
+        }
+    }
+
+    async fn status(&self) -> Status {
+        let missing = match self.kernel.lock().await.missing(&self.config).await {
+            Ok(missing) => missing,
+            Err(error) => vec![format!("unknown, {error:#}")],
+        };
         let state = self.state.borrow();
         let applied = &state.applied;
         let rules = applied
@@ -375,6 +414,7 @@ impl Daemon {
             operation: state.operation.as_ref().map(Operation::describe),
             rules_changed,
             singbox_changed,
+            missing,
         }
     }
 

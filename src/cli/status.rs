@@ -8,13 +8,14 @@ use futures_util::SinkExt;
 use super::{connect, receive, unexpected};
 use crate::rpc::{Request, Response, Status};
 
-pub async fn status(socket: &Path) -> Result<()> {
+/// Prints the status; false if kernel state uta installed is missing.
+pub async fn status(socket: &Path) -> Result<bool> {
     let (mut connection, _) = connect(socket).await?;
     connection.send(Request::Status).await?;
     match receive(&mut connection).await? {
         Response::Status(status) => {
             print(&status);
-            Ok(())
+            Ok(status.missing.is_empty())
         }
         response => unexpected(response),
     }
@@ -58,6 +59,13 @@ fn print(status: &Status) {
     if status.singbox_changed {
         println!(
             "The sing-box configuration changed since it was applied; run `uta apply` to apply it."
+        );
+    }
+    if !status.missing.is_empty() {
+        println!(
+            "Missing from the kernel: {}. Another program removed it; restart the daemon to \
+             install it again.",
+            status.missing.join(", ")
         );
     }
 }

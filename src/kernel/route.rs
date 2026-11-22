@@ -6,11 +6,15 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use anyhow::{Result, bail};
 use futures_util::TryStreamExt;
 use netlink_packet_route::{
-    AddressFamily,
+    AddressFamily, RouteNetlinkMessage,
     route::{RouteHeader, RouteMessage, RouteProtocol, RouteScope, RouteType},
     rule::{RuleAction, RuleAttribute},
 };
-use rtnetlink::{Handle, IpVersion, RouteMessageBuilder, RuleAddRequest};
+use nix::errno::Errno;
+use rtnetlink::{
+    Handle, IpVersion, RouteMessageBuilder, RuleAddRequest,
+    packet_core::{NetlinkMessage, NetlinkPayload},
+};
 
 use crate::config::Kernel;
 
@@ -22,33 +26,36 @@ pub const PROTOCOL: RouteProtocol = RouteProtocol::Other(117);
 const LOOPBACK_IFINDEX: u32 = 1;
 
 /// Installs, for both address families, the rules that send marked packets to
-/// uta's table and the table's route to the local stack.
-pub async fn install(handle: &Handle, kernel: &Kernel) -> Result<(), rtnetlink::Error> {
+/// uta's table and the table's route to the local stack. Entries that exist
+/// are kept, so that installing again puts back what another program removed.
+/// Returns how many entries it added.
+pub async fn install(handle: &Handle, kernel: &Kernel) -> Result<usize, rtnetlink::Error> {
     let Kernel {
         marks,
         route_table: table,
         rule_priority: first,
     } = *kernel;
     let skip = first + 3;
+    let mut added = 0;
     for family in [AddressFamily::Inet, AddressFamily::Inet6] {
         let rule = |priority, action| rule(handle, family, priority, action);
-        rule(skip, RuleAction::Nop).execute().await?;
-        with_mark(
+        added += new(rule(skip, RuleAction::Nop).execute().await)?;
+        added += new(with_mark(
             rule(first + 2, RuleAction::ToTable),
             marks.forward,
             marks.mask,
         )
         .table_id(table)
         .execute()
-        .await?;
-        with_mark(
+        .await)?;
+        added += new(with_mark(
             rule(first + 1, RuleAction::ToTable),
             marks.local,
             marks.mask,
         )
         .table_id(table)
         .execute()
-        .await?;
+        .await)?;
         // With src_valid_mark set, reverse path validation of a forwarded
         // packet looks up its source with the packet's mark and iif lo
         // (`__fib_validate_source` in net/ipv4/fib_frontend.c). That lookup
@@ -59,15 +66,77 @@ pub async fn install(handle: &Handle, kernel: &Kernel) -> Result<(), rtnetlink::
         goto.message_mut()
             .attributes
             .push(RuleAttribute::Goto(skip));
-        goto.execute().await?;
+        added += new(goto.execute().await)?;
     }
     for route in [
         local_default(RouteMessageBuilder::<Ipv4Addr>::new(), table),
         local_default(RouteMessageBuilder::<Ipv6Addr>::new(), table),
     ] {
-        handle.route().add(route).execute().await?;
+        added += new(handle.route().add(route).execute().await)?;
     }
-    Ok(())
+    Ok(added)
+}
+
+/// 1 if an entry was added, 0 if it existed.
+fn new(result: Result<(), rtnetlink::Error>) -> Result<usize, rtnetlink::Error> {
+    match result {
+        Ok(()) => Ok(1),
+        Err(rtnetlink::Error::NetlinkError(error))
+            if error.raw_code() == -(Errno::EEXIST as i32) =>
+        {
+            Ok(0)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// What of the rules and routes `install` adds is not in the kernel.
+pub async fn missing(handle: &Handle, kernel: &Kernel) -> Result<Vec<String>> {
+    let first = kernel.rule_priority;
+    let mut missing = Vec::new();
+    for (version, name) in [(IpVersion::V4, "IPv4"), (IpVersion::V6, "IPv6")] {
+        let rules: Vec<_> = handle.rule().get(version).execute().try_collect().await?;
+        let priorities: Vec<u32> = rules
+            .iter()
+            .filter(|rule| rule.attributes.contains(&RuleAttribute::Protocol(PROTOCOL)))
+            .filter_map(|rule| {
+                rule.attributes
+                    .iter()
+                    .find_map(|attribute| match attribute {
+                        RuleAttribute::Priority(priority) => Some(*priority),
+                        _ => None,
+                    })
+            })
+            .collect();
+        for priority in first..=first + 3 {
+            if !priorities.contains(&priority) {
+                missing.push(format!("{name} rule {priority}"));
+            }
+        }
+    }
+    for (dump, name) in [
+        (RouteMessageBuilder::<Ipv4Addr>::new().build(), "IPv4"),
+        (RouteMessageBuilder::<Ipv6Addr>::new().build(), "IPv6"),
+    ] {
+        let routes: Vec<_> = handle.route().get(dump).execute().try_collect().await?;
+        if !routes.iter().any(|route| route.header.protocol == PROTOCOL) {
+            missing.push(format!("{name} route in table {}", kernel.route_table));
+        }
+    }
+    Ok(missing)
+}
+
+/// Whether `message` reports that one of uta's rules or routes was deleted.
+pub fn removes_ours(message: &NetlinkMessage<RouteNetlinkMessage>) -> bool {
+    match &message.payload {
+        NetlinkPayload::InnerMessage(RouteNetlinkMessage::DelRule(rule)) => {
+            rule.attributes.contains(&RuleAttribute::Protocol(PROTOCOL))
+        }
+        NetlinkPayload::InnerMessage(RouteNetlinkMessage::DelRoute(route)) => {
+            route.header.protocol == PROTOCOL
+        }
+        _ => false,
+    }
 }
 
 /// Removes every rule and route with uta's protocol, continuing past failures.

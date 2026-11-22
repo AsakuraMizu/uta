@@ -7,8 +7,10 @@ use std::{
 };
 
 use compio::runtime::fd::PollFd;
+use futures_channel::mpsc::UnboundedReceiver;
+use netlink_packet_route::RouteNetlinkMessage;
 use netlink_sys::{AsyncSocket, Socket, SocketAddr};
-use rtnetlink::Handle;
+use rtnetlink::{Handle, MulticastGroup, packet_core::NetlinkMessage};
 
 /// Opens an rtnetlink connection whose I/O task runs on the current compio
 /// runtime.
@@ -16,6 +18,21 @@ pub fn connect() -> io::Result<Handle> {
     let (connection, handle, _) = rtnetlink::new_connection_with_socket::<CompioSocket>()?;
     compio::runtime::spawn(connection).detach();
     Ok(handle)
+}
+
+/// Notifications of changes to rules and routes, received on the current
+/// compio runtime.
+pub fn watch_routing()
+-> io::Result<UnboundedReceiver<(NetlinkMessage<RouteNetlinkMessage>, SocketAddr)>> {
+    let (connection, _, messages) =
+        rtnetlink::new_multicast_connection_with_socket::<CompioSocket>(&[
+            MulticastGroup::Ipv4Rule,
+            MulticastGroup::Ipv6Rule,
+            MulticastGroup::Ipv4Route,
+            MulticastGroup::Ipv6Route,
+        ])?;
+    compio::runtime::spawn(connection).detach();
+    Ok(messages)
 }
 
 pub struct CompioSocket {
