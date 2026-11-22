@@ -649,14 +649,40 @@ fn relative_paths_in_the_sing_box_configuration_resolve_against_its_directory() 
     stop_workstation();
 }
 
+/// The journal of uta while `start` ran.
+fn journal_while(start: impl FnOnce()) -> Vec<String> {
+    // Lines of earlier runs fall in an earlier second.
+    let since = ok("workstation", As::Alice, "sleep 1; date +%s");
+    start();
+    assert_eq!(seen("workstation", As::Alice, ORIGIN), RELAY);
+    stop_workstation();
+    let journal = ok(
+        "workstation",
+        As::Alice,
+        &format!("journalctl --user -u uta --since @{since} -o cat"),
+    );
+    journal.lines().map(str::to_owned).collect()
+}
+
 #[test]
 fn sing_box_log_settings_cannot_hide_startup() {
     let _topology = lock();
     let mut config: serde_json::Value = serde_json::from_str(SING_BOX_CONFIG).unwrap();
     config["log"] = serde_json::json!({ "disabled": true, "output": "sing-box.log" });
-    start_workstation_with("uid:alice\n", &config.to_string());
-    assert_eq!(seen("workstation", As::Alice, ORIGIN), RELAY);
-    stop_workstation();
+    let lines = journal_while(|| start_workstation_with("uid:alice\n", &config.to_string()));
+    assert!(
+        lines.iter().any(|line| line.starts_with("INFO[")),
+        "{lines:?}"
+    );
+
+    // Above info, uta still sees sing-box start, and drops the lines below the
+    // level.
+    config["log"]["level"] = "warn".into();
+    let lines = journal_while(|| start_workstation_with("uid:alice\n", &config.to_string()));
+    assert!(
+        !lines.iter().any(|line| line.starts_with("INFO[")),
+        "{lines:?}"
+    );
 }
 
 #[test]

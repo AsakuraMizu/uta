@@ -21,7 +21,7 @@ use crate::{
     config::rules::{self, Rule},
     rpc::{Request, Response},
     selection::{CGROUP_ROOT, resolve},
-    singbox::{self, Files, Process},
+    singbox::{self, Files, Level, Process},
 };
 
 impl Daemon {
@@ -58,15 +58,16 @@ impl Daemon {
         let old = self.state.borrow().applied.clone();
         let capture_changed = new.selection() != old.selection();
 
-        if !singbox_changed && !capture_changed {
+        if singbox_changed.is_none() && !capture_changed {
             self.state.borrow_mut().applied = new;
             self.update_watches();
             connection.send(Response::Unchanged).await?;
             return Ok(());
         }
-        if singbox_changed {
-            self.reload().await?;
+        if let Some(filter) = singbox_changed {
+            self.reload(filter).await?;
         }
+        let singbox_changed = singbox_changed.is_some();
 
         self.state.borrow_mut().trial = Some(new.clone());
         self.update_watches();
@@ -208,8 +209,8 @@ impl Daemon {
     }
 
     /// Resolves the rules and, if the sing-box configuration changed, writes
-    /// and checks it in the staging directory.
-    async fn prepare(&self, rules: Option<String>) -> Result<(Applied, bool)> {
+    /// and checks it in the staging directory and returns its log filter.
+    async fn prepare(&self, rules: Option<String>) -> Result<(Applied, Option<Option<Level>>)> {
         let text = match rules {
             Some(text) => text,
             None => read_rules(&self.rules_path)?,
@@ -217,11 +218,12 @@ impl Daemon {
         let rules = rules::parse(&text)?;
         let resolved = resolve::resolve(&rules, Path::new(CGROUP_ROOT))?;
         let files = Files::collect(&self.config)?;
-        let singbox_changed = !files.matches(&self.paths.current)?;
-        if singbox_changed {
+        let singbox_changed = if files.matches(&self.paths.current)? {
+            None
+        } else {
             files.write(&self.paths.staging)?;
-            check(&self.config, &self.paths.staging, &self.paths.merged).await?;
-        }
+            Some(check(&self.config, &self.paths.staging, &self.paths.merged).await?)
+        };
         Ok((
             Applied {
                 text,
@@ -244,17 +246,20 @@ impl Daemon {
         Some(OperationGuard(self))
     }
 
-    /// Makes sing-box run the staging configuration. On failure, sing-box runs
-    /// the previous configuration again.
-    async fn reload(self: &Rc<Self>) -> Result<()> {
+    /// Makes sing-box run the staging configuration, whose log filter is
+    /// `filter`. On failure, sing-box runs the previous configuration again.
+    async fn reload(self: &Rc<Self>, filter: Option<Level>) -> Result<()> {
         singbox::remove_dir(&self.paths.previous)?;
         fs::rename(&self.paths.current, &self.paths.previous)?;
         fs::rename(&self.paths.staging, &self.paths.current)?;
+        self.swap_log_filter(filter);
         let Err(error) = self.hup().await else {
             return Ok(());
         };
         fs::rename(&self.paths.current, &self.paths.staging)?;
         fs::rename(&self.paths.previous, &self.paths.current)?;
+        let filter = self.state.borrow().previous_log_filter;
+        self.swap_log_filter(filter);
         self.restart().await?;
         Err(error
             .context("sing-box failed with the new configuration; it runs the previous one again"))
@@ -265,10 +270,20 @@ impl Daemon {
         singbox::remove_dir(&self.paths.staging)?;
         fs::rename(&self.paths.current, &self.paths.staging)?;
         fs::rename(&self.paths.previous, &self.paths.current)?;
+        let filter = self.state.borrow().previous_log_filter;
+        self.swap_log_filter(filter);
         if self.hup().await.is_err() {
             self.restart().await?;
         }
         Ok(())
+    }
+
+    /// Makes `filter` the log filter of the configuration sing-box runs, and
+    /// the one it replaces the previous.
+    fn swap_log_filter(&self, filter: Option<Level>) {
+        let mut state = self.state.borrow_mut();
+        state.previous_log_filter = std::mem::replace(&mut state.log_filter, filter);
+        state.process.filter_log(filter);
     }
 
     /// Sends SIGHUP and waits for sing-box to report startup with the
@@ -302,6 +317,7 @@ impl Daemon {
                 &self.paths.current,
                 &self.config.singbox.work_dir,
             )?);
+            process.filter_log(self.state.borrow().log_filter);
             self.state.borrow_mut().process = Rc::clone(&process);
             self.watch(&process);
             wait_ready(&process, 0).await?;

@@ -24,6 +24,9 @@ pub const DNS_INBOUND: &str = "uta-dns";
 /// (`box.go`).
 pub const READY: &str = "sing-box started (";
 
+/// The file of uta's fragment, which sorts before the user's files.
+const FRAGMENT: &str = "000-uta.json";
+
 /// The fragment that sorts before the user's files.
 ///
 /// When sing-box merges files, the first file wins on a conflicting scalar and
@@ -60,7 +63,7 @@ impl Files {
     pub fn collect(config: &Config) -> Result<Self> {
         let fragment = fragment(&config.ports, &config.kernel.marks);
         let mut files = vec![File {
-            name: "000-uta.json".to_owned(),
+            name: FRAGMENT.to_owned(),
             content: serde_json::to_vec_pretty(&fragment)?,
             mode: None,
         }];
@@ -97,7 +100,10 @@ impl Files {
         Ok(())
     }
 
-    /// Whether `dir` holds exactly these files.
+    /// Whether `dir` holds exactly these files. The content of uta's fragment
+    /// is not compared: it depends on the user's files, through
+    /// [`log_at_info`], and otherwise only on `uta.toml`, which does not change
+    /// while the daemon runs.
     pub fn matches(&self, dir: &Path) -> io::Result<bool> {
         let mut names = Vec::new();
         for entry in fs::read_dir(dir)? {
@@ -108,13 +114,13 @@ impl Files {
             return Ok(false);
         }
         for file in &self.0 {
+            let Some(mode) = file.mode else {
+                continue;
+            };
             let path = dir.join(&file.name);
-            if let Some(mode) = file.mode
-                && fs::metadata(&path)?.permissions().mode() & 0o7777 != mode
+            if fs::metadata(&path)?.permissions().mode() & 0o7777 != mode
+                || fs::read(&path)? != file.content
             {
-                return Ok(false);
-            }
-            if fs::read(&path)? != file.content {
                 return Ok(false);
             }
         }
@@ -206,14 +212,56 @@ async fn run(command: &mut Command, what: &str) -> Result<()> {
     Ok(())
 }
 
-/// Checks that the merged configuration logs at the level of the startup line,
-/// which uta waits for.
-pub fn check_log(merged: &Value) -> Result<()> {
-    if let Some(level) = merged["log"]["level"].as_str()
-        && matches!(level, "warn" | "warning" | "error" | "fatal" | "panic")
-    {
-        bail!("log.level is {level}, but uta needs info or a lower level to detect startup");
+/// A sing-box log level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Level {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+    Fatal,
+    Panic,
+}
+
+impl Level {
+    /// The level of a log line, such as `INFO[0012] ...` or, with timestamps,
+    /// `+0800 2026-01-02 03:04:05 INFO ...`.
+    pub fn of_line(line: &str) -> Option<Self> {
+        line.split_whitespace().take(4).find_map(|word| {
+            match word.split_once('[').map_or(word, |(level, _)| level) {
+                "TRACE" => Some(Self::Trace),
+                "DEBUG" => Some(Self::Debug),
+                "INFO" => Some(Self::Info),
+                "WARN" => Some(Self::Warn),
+                "ERROR" => Some(Self::Error),
+                "FATAL" => Some(Self::Fatal),
+                "PANIC" => Some(Self::Panic),
+                _ => None,
+            }
+        })
     }
+}
+
+/// The level the merged configuration asks for, if it is above info. uta
+/// waits for an info line on startup, so such a configuration has to run at
+/// info, and uta drops the lines below the level asked for.
+pub fn log_filter(merged: &Value) -> Option<Level> {
+    match merged["log"]["level"].as_str()? {
+        "warn" | "warning" => Some(Level::Warn),
+        "error" => Some(Level::Error),
+        "fatal" => Some(Level::Fatal),
+        "panic" => Some(Level::Panic),
+        _ => None,
+    }
+}
+
+/// Makes the configuration in `dir` log at info, through uta's fragment.
+pub fn log_at_info(dir: &Path) -> Result<()> {
+    let path = dir.join(FRAGMENT);
+    let mut fragment: Value = serde_json::from_slice(&fs::read(&path)?)?;
+    fragment["log"]["level"] = "info".into();
+    fs::write(&path, serde_json::to_vec_pretty(&fragment)?)?;
     Ok(())
 }
 
@@ -222,9 +270,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn log_must_reach_uta_at_info_level() {
-        assert!(check_log(&json!({})).is_ok());
-        assert!(check_log(&json!({ "log": { "level": "debug", "timestamp": true } })).is_ok());
-        assert!(check_log(&json!({ "log": { "level": "warn" } })).is_err());
+    fn levels_of_log_lines() {
+        let level = Level::of_line;
+        assert_eq!(
+            level("INFO[0000] sing-box started (0.00s)"),
+            Some(Level::Info)
+        );
+        assert_eq!(
+            level("+0800 2026-01-02 03:04:05 WARN [123 0ms] dns: lookup failed"),
+            Some(Level::Warn)
+        );
+        assert_eq!(level("DEBUG[0003] router: match"), Some(Level::Debug));
+        assert_eq!(level("goroutine 1 [running]:"), None);
+    }
+
+    #[test]
+    fn levels_above_info_are_filtered() {
+        assert_eq!(log_filter(&json!({})), None);
+        assert_eq!(log_filter(&json!({ "log": { "level": "debug" } })), None);
+        assert_eq!(
+            log_filter(&json!({ "log": { "level": "warn" } })),
+            Some(Level::Warn)
+        );
+        assert_eq!(
+            log_filter(&json!({ "log": { "level": "error" } })),
+            Some(Level::Error)
+        );
     }
 }

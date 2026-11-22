@@ -27,7 +27,7 @@ use nix::{
     unistd::Pid,
 };
 
-use super::READY;
+use super::{Level, READY};
 
 /// Lines of sing-box output kept for error reports.
 const TAIL_LINES: usize = 40;
@@ -45,6 +45,8 @@ struct Log {
     /// How many startup lines sing-box has logged; every reload logs another.
     ready: u64,
     waiters: Vec<oneshot::Sender<()>>,
+    /// Lines below this level are not forwarded.
+    filter: Option<Level>,
 }
 
 impl Process {
@@ -145,7 +147,12 @@ impl Process {
         kill(self.pid, signal).map_err(io::Error::from)
     }
 
-    /// The last lines sing-box logged.
+    /// Stops forwarding the lines below `level`, or forwards every line.
+    pub fn filter_log(&self, level: Option<Level>) {
+        self.log.borrow_mut().filter = level;
+    }
+
+    /// The last lines sing-box logged, including those not forwarded.
     pub fn tail(&self) -> String {
         let log = self.log.borrow();
         let lines: Vec<&str> = log.tail.iter().map(String::as_str).collect();
@@ -158,10 +165,16 @@ async fn read_log(stderr: ChildStderr, log: Rc<RefCell<Log>>) {
         .with_reader(stderr);
     while let Some(Ok(line)) = lines.next().await {
         let line = String::from_utf8_lossy(&line).into_owned();
-        // A failed write to uta's own stderr must not stop the readiness
-        // tracking.
-        let _ = writeln!(io::stderr(), "{line}");
         let mut log = log.borrow_mut();
+        // Lines without a level, such as those of a panic, are forwarded.
+        if log
+            .filter
+            .is_none_or(|filter| Level::of_line(&line).is_none_or(|level| level >= filter))
+        {
+            // A failed write to uta's own stderr must not stop the readiness
+            // tracking.
+            let _ = writeln!(io::stderr(), "{line}");
+        }
         if line.contains(READY) {
             log.ready += 1;
             for waiter in log.waiters.drain(..) {

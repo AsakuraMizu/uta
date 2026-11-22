@@ -49,7 +49,7 @@ use crate::{
         resolve::{self, Resolved},
         watch::Watcher,
     },
-    singbox::{self, Files, Process},
+    singbox::{self, Files, Level, Process},
 };
 
 /// How long sing-box may take to report startup, which includes fetching remote
@@ -107,6 +107,10 @@ impl Paths {
 
 struct State {
     process: Rc<Process>,
+    /// The log filter of the configuration sing-box runs, and of the one a
+    /// reload replaced.
+    log_filter: Option<Level>,
+    previous_log_filter: Option<Level>,
     /// An operation is replacing or reloading sing-box and handles its exit
     /// itself.
     replacing: bool,
@@ -185,12 +189,13 @@ pub async fn run(options: Options) -> Result<()> {
     let paths = Paths::new(&std::path::absolute(&options.runtime_dir)?);
 
     Files::collect(&config)?.write(&paths.current)?;
-    check(&config, &paths.current, &paths.merged).await?;
+    let log_filter = check(&config, &paths.current, &paths.merged).await?;
     let process = Rc::new(Process::spawn(
         &config.singbox.binary,
         &paths.current,
         &config.singbox.work_dir,
     )?);
+    process.filter_log(log_filter);
     let started = async {
         wait_ready(&process, 0).await?;
         let mut selection = Selection::default();
@@ -222,6 +227,8 @@ pub async fn run(options: Options) -> Result<()> {
         watcher,
         state: RefCell::new(State {
             process: Rc::clone(&process),
+            log_filter,
+            previous_log_filter: None,
             replacing: false,
             applied: Applied {
                 text,
@@ -510,12 +517,18 @@ fn read_rules(path: &Path) -> Result<String> {
     fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))
 }
 
-async fn check(config: &Config, dir: &Path, merged: &Path) -> Result<()> {
+/// Checks the configuration in `dir` and returns the level below which its
+/// log lines are dropped; see [`singbox::log_filter`].
+async fn check(config: &Config, dir: &Path, merged: &Path) -> Result<Option<Level>> {
     let SingBox {
         binary, work_dir, ..
     } = &config.singbox;
     singbox::check(binary, work_dir, dir).await?;
-    singbox::check_log(&singbox::merge(binary, work_dir, dir, merged).await?)
+    let filter = singbox::log_filter(&singbox::merge(binary, work_dir, dir, merged).await?);
+    if filter.is_some() {
+        singbox::log_at_info(dir)?;
+    }
+    Ok(filter)
 }
 
 async fn wait_ready(process: &Process, count: u64) -> Result<()> {
