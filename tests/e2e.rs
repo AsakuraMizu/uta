@@ -121,13 +121,19 @@ fn ok(node: &str, user: As, script: &str) -> String {
 }
 
 fn write(node: &str, path: &str, content: &str, owner: &str) {
-    let output = sh_with_input(
-        node,
-        As::Root,
-        &format!("cat > {path} && chown {owner} {path}"),
-        content,
-    );
-    assert!(output.status.success(), "writing {path} on {node} failed");
+    write_files(node, &[(path, content)], owner);
+}
+
+/// Writes files, in one exec.
+fn write_files(node: &str, files: &[(&str, &str)], owner: &str) {
+    let script: Vec<String> = files
+        .iter()
+        .map(|(path, content)| {
+            let quoted = content.replace('\'', r"'\''");
+            format!("printf '%s' '{quoted}' > {path} && chown {owner} {path}")
+        })
+        .collect();
+    ok(node, As::Root, &script.join(" && "));
 }
 
 /// The address origin saw for a TCP connection.
@@ -140,7 +146,8 @@ fn seen_udp(node: &str, user: As, target: &str) -> String {
     stdout(&sh(
         node,
         user,
-        &format!("echo x | socat -T 3 - {target},shut-none"),
+        // Origin answers at once; socat waits -t before it exits.
+        &format!("echo x | socat -T 3 -t 0.1 - {target},shut-none"),
     ))
 }
 
@@ -167,15 +174,15 @@ fn uta(user: As, args: &str) -> Output {
 /// Kernel objects uta owns on a node: (tables, rules of each family, routes of
 /// each family).
 fn kernel_objects(node: &str) -> (usize, usize, usize) {
-    let count = |script: &str| ok(node, As::Root, script).parse().unwrap_or(0);
-    (
-        count("nft list tables | grep -c 'inet uta$' || true"),
-        count("{ ip -4 rule; ip -6 rule; } | grep -c 'proto 117' || true"),
-        count(
-            "{ ip -4 route show table all; ip -6 route show table all; } | grep -c 'proto 117' || \
-             true",
-        ),
-    )
+    let counts = ok(
+        node,
+        As::Root,
+        "echo $(nft list tables | grep -c 'inet uta$') $({ ip -4 rule; ip -6 rule; } | grep -c \
+         'proto 117') $({ ip -4 route show table all; ip -6 route show table all; } | grep -c \
+         'proto 117')",
+    );
+    let counts: Vec<usize> = counts.split(' ').map(|n| n.parse().unwrap()).collect();
+    (counts[0], counts[1], counts[2])
 }
 
 /// Starts uta on the workstation as alice deploys it, with `rules` and the test
@@ -187,30 +194,29 @@ fn start_workstation(rules: &str) {
 
 fn start_workstation_with(rules: &str, sing_box_config: &str) {
     stop_workstation();
-    write(
+    write_files(
         "workstation",
-        &format!("{ALICE_CONFIG}/uta.toml"),
-        "[singbox]\nconfig = [\"sing-box\"]\n",
-        "alice:alice",
-    );
-    write(
-        "workstation",
-        &format!("{ALICE_CONFIG}/rules"),
-        rules,
-        "alice:alice",
-    );
-    write(
-        "workstation",
-        &format!("{ALICE_CONFIG}/sing-box/config.json"),
-        sing_box_config,
+        &[
+            (
+                &format!("{ALICE_CONFIG}/uta.toml"),
+                "[singbox]\nconfig = [\"sing-box\"]\n",
+            ),
+            (&format!("{ALICE_CONFIG}/rules"), rules),
+            (
+                &format!("{ALICE_CONFIG}/sing-box/config.json"),
+                sing_box_config,
+            ),
+        ],
         "alice:alice",
     );
     ok(
         "workstation",
         As::Alice,
-        "systemctl --user reset-failed uta 2>/dev/null; systemctl --user start uta",
+        &format!(
+            "systemctl --user reset-failed uta 2>/dev/null; systemctl --user start uta && {UTA} \
+             status >/dev/null"
+        ),
     );
-    assert!(uta(As::Alice, "status").status.success());
 }
 
 fn stop_workstation() {
@@ -399,14 +405,19 @@ fn run_with_captures_sources_until_the_command_ends() {
     stop_workstation();
 }
 
-/// Runs `uta <args>` in a terminal, typing `answer`, if any, after a second.
-fn uta_in_terminal(args: &str, answer: Option<&str>) -> Output {
+/// A script that runs `uta <args>` in a terminal, typing `answer`, if any. The
+/// input stays open, as a terminal's does, but the script ends with uta.
+fn in_terminal(args: &str, answer: Option<&str>) -> String {
     let typing = answer.map_or_else(String::new, |answer| format!("echo {answer};"));
-    sh(
-        "workstation",
-        As::Alice,
-        &format!("(sleep 1; {typing} sleep 3) | script -qec '{UTA} {args}' /dev/null"),
+    format!(
+        "(input=$(mktemp -u); mkfifo $input; ({typing} exec sleep 60) >$input 2>/dev/null & \
+         typing=$!; script -qec '{UTA} {args}' /dev/null <$input; status=$?; kill $typing; rm \
+         $input; exit $status)"
     )
+}
+
+fn uta_in_terminal(args: &str, answer: Option<&str>) -> Output {
+    sh("workstation", As::Alice, &in_terminal(args, answer))
 }
 
 fn rules_file() -> String {
@@ -479,8 +490,8 @@ fn changes_to_capture_need_confirmation() {
         "workstation",
         As::Alice,
         &format!(
-            "(sleep 30) | script -qec '{UTA} del uid:bob --timeout 30' /dev/null & sleep 1.5; \
-             pkill -f '^{UTA} del'; sleep 1"
+            "{} & sleep 0.5; pkill -f '^{UTA} del'; wait",
+            in_terminal("del uid:bob --timeout 30", None)
         ),
     );
     assert_eq!(seen("workstation", As::Bob, ORIGIN), RELAY);
@@ -519,9 +530,11 @@ fn an_unwritable_rules_file_rolls_the_change_back() {
 fn a_pending_change_makes_other_changes_busy() {
     let _topology = lock();
     start_workstation("uid:alice\n");
-    let pending = format!("(sleep 5) | script -qec '{UTA} add uid:bob --timeout 4' /dev/null");
-    let script =
-        format!("{pending} >/dev/null & sleep 1.5; {UTA} apply --yes 2>&1; echo \"exit $?\"; wait");
+    let pending = in_terminal("add uid:bob --timeout 30", None);
+    let script = format!(
+        "{pending} >/dev/null & sleep 0.5; {UTA} apply --yes 2>&1; echo \"exit $?\"; {UTA} \
+         rollback >/dev/null; wait"
+    );
     let output = ok("workstation", As::Alice, &script);
     assert!(output.contains("the daemon is busy"), "{output}");
     assert!(output.ends_with("exit 1"), "{output}");
@@ -566,8 +579,9 @@ fn changes_confirmed_later() {
         "workstation",
         As::Alice,
         &format!(
-            "(sleep 30) | script -qec '{UTA} del uid:bob --timeout 30' /dev/null >/dev/null & \
-             asking=$!; sleep 1.5; {UTA} confirm >/dev/null; wait $asking; echo \"exit $?\""
+            "{} >/dev/null & asking=$!; sleep 0.5; {UTA} confirm >/dev/null; wait $asking; echo \
+             \"exit $?\"",
+            in_terminal("del uid:bob --timeout 30", None)
         ),
     );
     assert_eq!(asking, "exit 0");
@@ -756,19 +770,19 @@ fn start_router(rules: &str) {
 
 fn start_router_with(rules: &str, sing_box_config: &str) {
     stop_router();
-    write("router", "/etc/uta/rules", rules, "root:root");
-    write(
+    write_files(
         "router",
-        "/etc/uta/sing-box/config.json",
-        sing_box_config,
+        &[
+            ("/etc/uta/rules", rules),
+            ("/etc/uta/sing-box/config.json", sing_box_config),
+        ],
         "root:root",
     );
     ok(
         "router",
         As::Root,
-        "systemctl reset-failed uta 2>/dev/null; systemctl start uta",
+        "systemctl reset-failed uta 2>/dev/null; systemctl start uta && uta status >/dev/null",
     );
-    assert!(sh("router", As::Root, "uta status").status.success());
 }
 
 fn stop_router() {
@@ -885,7 +899,7 @@ fn dns_of_forwarded_clients_reaches_sing_box() {
         !sh(
             "client",
             As::Root,
-            "dig +short +time=2 +tries=1 -p 7853 @192.168.10.1 probe.test"
+            "dig +short +time=1 +tries=1 -p 7853 @192.168.10.1 probe.test"
         )
         .status
         .success()
