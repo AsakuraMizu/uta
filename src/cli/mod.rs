@@ -73,7 +73,7 @@ enum Command {
         #[arg(required = true, value_name = "RULE")]
         rules: Vec<Rule>,
         #[command(flatten)]
-        confirm: Confirm,
+        confirm: Confirmation,
     },
     /// Remove rules from the rules file and apply the result
     #[command(after_help = RULES_HELP)]
@@ -81,14 +81,18 @@ enum Command {
         #[arg(required = true, value_name = "RULE")]
         rules: Vec<Rule>,
         #[command(flatten)]
-        confirm: Confirm,
+        confirm: Confirmation,
     },
     /// Apply the rules file and the sing-box configuration
     #[command(after_help = RULES_HELP)]
     Apply {
         #[command(flatten)]
-        confirm: Confirm,
+        confirm: Confirmation,
     },
+    /// Keep the change waiting for confirmation
+    Confirm,
+    /// Roll back the change waiting for confirmation
+    Rollback,
     /// Run a command, or $SHELL, with its traffic captured
     Run {
         /// Also capture what RULE selects while the command runs; a rule that
@@ -123,13 +127,27 @@ enum Command {
 }
 
 #[derive(Args)]
-struct Confirm {
-    /// Keep a change to the captured traffic without asking
+struct Confirmation {
+    /// Keep the change without asking
     #[arg(long)]
     yes: bool,
+    /// Return at once and leave the change waiting for `uta confirm` or `uta
+    /// rollback`
+    #[arg(long, conflicts_with = "yes")]
+    pending: bool,
     /// Seconds to wait for confirmation before rolling back
     #[arg(long, default_value_t = 90, value_name = "SECONDS")]
     timeout: u64,
+}
+
+impl From<Confirmation> for apply::Confirmation {
+    fn from(confirmation: Confirmation) -> Self {
+        Self {
+            ask: !confirmation.yes,
+            pending: confirmation.pending,
+            secs: confirmation.timeout,
+        }
+    }
 }
 
 pub fn main() -> ExitCode {
@@ -156,14 +174,14 @@ async fn run(cli: Cli) -> Result<bool> {
     match cli.command {
         Command::Status => status::status(&socket()).await,
         Command::Add { rules, confirm } => {
-            apply::apply(&socket(), Change::Add(rules), confirm.yes, confirm.timeout).await
+            apply::apply(&socket(), Change::Add(rules), confirm.into()).await
         }
         Command::Del { rules, confirm } => {
-            apply::apply(&socket(), Change::Del(rules), confirm.yes, confirm.timeout).await
+            apply::apply(&socket(), Change::Del(rules), confirm.into()).await
         }
-        Command::Apply { confirm } => {
-            apply::apply(&socket(), Change::File, confirm.yes, confirm.timeout).await
-        }
+        Command::Apply { confirm } => apply::apply(&socket(), Change::File, confirm.into()).await,
+        Command::Confirm => apply::confirm(&socket()).await,
+        Command::Rollback => apply::rollback(&socket()).await,
         Command::Run {
             with,
             in_scope,

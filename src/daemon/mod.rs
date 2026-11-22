@@ -116,6 +116,23 @@ struct State {
     /// The scopes of `uta run`.
     runs: Vec<Run>,
     operation: Option<Operation>,
+    /// The change waiting for confirmation.
+    pending: Option<Pending>,
+}
+
+/// A change waiting for confirmation, which any client may decide.
+struct Pending {
+    /// The rules the client asked for, which a confirming client writes to the
+    /// rules file.
+    rules: Option<String>,
+    decide: oneshot::Sender<Decision>,
+}
+
+/// Whether to keep the change waiting for confirmation, and where to report
+/// the outcome.
+struct Decision {
+    keep: bool,
+    reply: oneshot::Sender<Response>,
 }
 
 /// A `uta run` scope and the sources captured along with it.
@@ -214,6 +231,7 @@ pub async fn run(options: Options) -> Result<()> {
             trial: None,
             runs: Vec::new(),
             operation: None,
+            pending: None,
         }),
         stopping: Cell::new(false),
         fatal: RefCell::new(Some(fatal)),
@@ -330,7 +348,10 @@ impl Daemon {
             Some(Ok(Request::Apply {
                 rules,
                 confirm_secs,
-            })) => self.apply(connection, rules, confirm_secs).await?,
+                pending,
+            })) => self.apply(connection, rules, confirm_secs, pending).await?,
+            Some(Ok(Request::Confirm)) => self.confirm(connection).await?,
+            Some(Ok(Request::Rollback)) => self.decide(connection, false).await?,
             Some(Ok(Request::Covered)) => {
                 let pid = peer.context("failed to identify the client")?;
                 let covered = self.covers(pid)?;

@@ -1,7 +1,8 @@
 //! The control protocol: one JSON value per line over the daemon's unix socket.
 //!
 //! Every connection starts with a hello, then carries one request. A connection
-//! is one transaction: closing it cancels an apply that has not been confirmed.
+//! is one transaction: closing it cancels an apply that has not been confirmed,
+//! unless the apply left it pending, for another connection to confirm.
 
 use std::{fs, io, os::unix::fs::MetadataExt, path::PathBuf};
 
@@ -39,8 +40,15 @@ pub enum Request {
     Apply {
         rules: Option<String>,
         confirm_secs: u64,
+        /// Leave the change waiting after the client goes away, for another
+        /// client to confirm or roll back.
+        pending: bool,
     },
+    /// Keeps the change waiting for confirmation. As the first request, asks
+    /// for the rules the client writes to the rules file before it confirms
+    /// with another `Confirm`.
     Confirm,
+    /// Rolls back the change waiting for confirmation.
     Rollback,
     /// Whether the client's cgroup is already captured through a cgroup, such
     /// as the scope of an enclosing `uta run`.
@@ -60,14 +68,15 @@ pub enum Response {
     Status(Status),
     /// The request matches what is running.
     Unchanged,
-    /// Only the sing-box configuration changed; it is running now.
-    Applied,
-    /// The captured traffic changed and is rolled back unless confirmed within
+    /// The change is in effect and is rolled back unless confirmed within
     /// `secs`.
     Pending {
         changes: Vec<String>,
         secs: u64,
     },
+    /// The rules to write to the rules file before confirming, if the change
+    /// came with any.
+    Confirming(Option<String>),
     Confirmed,
     RolledBack(String),
     Covered(bool),

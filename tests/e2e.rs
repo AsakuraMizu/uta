@@ -511,6 +511,73 @@ fn a_pending_change_makes_other_changes_busy() {
 }
 
 #[test]
+fn changes_confirmed_later() {
+    let _topology = lock();
+    start_workstation("uid:alice\n");
+
+    // The change waits after the command returns, without a terminal.
+    assert!(uta(As::Alice, "add --pending uid:bob").status.success());
+    assert_eq!(seen("workstation", As::Bob, ORIGIN), RELAY);
+    assert_eq!(rules_file(), "uid:alice");
+    assert!(!uta(As::Alice, "del --yes uid:alice").status.success());
+    assert!(uta(As::Alice, "confirm").status.success());
+    assert_eq!(rules_file(), "uid:alice\nuid:bob");
+    assert_eq!(seen("workstation", As::Bob, ORIGIN), RELAY);
+    assert!(!uta(As::Alice, "confirm").status.success());
+
+    assert!(uta(As::Alice, "del --pending uid:bob").status.success());
+    assert_eq!(seen("workstation", As::Bob, ORIGIN), WORKSTATION);
+    assert!(uta(As::Alice, "rollback").status.success());
+    assert_eq!(seen("workstation", As::Bob, ORIGIN), RELAY);
+    assert_eq!(rules_file(), "uid:alice\nuid:bob");
+
+    // Nobody confirms.
+    assert!(
+        uta(As::Alice, "del --pending --timeout 3 uid:bob")
+            .status
+            .success()
+    );
+    assert_eq!(seen("workstation", As::Bob, ORIGIN), WORKSTATION);
+    wait_until("the change rolls back", Duration::from_secs(10), || {
+        seen("workstation", As::Bob, ORIGIN) == RELAY
+    });
+    assert_eq!(rules_file(), "uid:alice\nuid:bob");
+
+    // Another client confirms a change that a terminal asks about.
+    let asking = ok(
+        "workstation",
+        As::Alice,
+        &format!(
+            "(sleep 30) | script -qec '{UTA} del uid:bob --timeout 30' /dev/null >/dev/null & \
+             asking=$!; sleep 1.5; {UTA} confirm >/dev/null; wait $asking; echo \"exit $?\""
+        ),
+    );
+    assert_eq!(asking, "exit 0");
+    assert_eq!(rules_file(), "uid:alice");
+    assert_eq!(seen("workstation", As::Bob, ORIGIN), WORKSTATION);
+    stop_workstation();
+}
+
+#[test]
+fn sing_box_changes_need_confirmation_too() {
+    let _topology = lock();
+    start_workstation("uid:alice\n");
+    let mut config: serde_json::Value = serde_json::from_str(SING_BOX_CONFIG).unwrap();
+    config["route"]["final"] = "direct".into();
+    write(
+        "workstation",
+        &format!("{ALICE_CONFIG}/sing-box/config.json"),
+        &config.to_string(),
+        "alice:alice",
+    );
+    assert!(uta(As::Alice, "apply --pending").status.success());
+    assert_eq!(seen("workstation", As::Alice, ORIGIN), WORKSTATION);
+    assert!(uta(As::Alice, "rollback").status.success());
+    assert_eq!(seen("workstation", As::Alice, ORIGIN), RELAY);
+    stop_workstation();
+}
+
+#[test]
 fn fails_open_when_sing_box_dies() {
     let _topology = lock();
     start_workstation("uid:alice\n");

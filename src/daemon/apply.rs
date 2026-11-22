@@ -8,12 +8,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use compio::time::sleep;
-use futures_util::{FutureExt, SinkExt, StreamExt, pin_mut, select};
+use futures_channel::oneshot;
+use futures_util::{FutureExt, SinkExt, StreamExt, future, pin_mut, select};
 use nix::sys::signal::Signal;
 
-use super::{Applied, Connection, Daemon, Operation, check, read_rules, stop, wait_ready};
+use super::{
+    Applied, Connection, Daemon, Decision, Operation, Pending, check, read_rules, stop, wait_ready,
+};
 use crate::{
     config::rules::{self, Rule},
     rpc::{Request, Response},
@@ -27,6 +30,7 @@ impl Daemon {
         connection: &mut Connection,
         rules: Option<String>,
         confirm_secs: u64,
+        pending: bool,
     ) -> Result<()> {
         let Some(_operation) = self.begin("apply") else {
             let operation = self
@@ -43,7 +47,7 @@ impl Daemon {
 
         // A client that goes away while the change is prepared cancels it.
         let (new, singbox_changed) = {
-            let prepare = self.prepare(rules).fuse();
+            let prepare = self.prepare(rules.clone()).fuse();
             let closed = connection.next().fuse();
             pin_mut!(prepare, closed);
             select! {
@@ -63,12 +67,6 @@ impl Daemon {
         if singbox_changed {
             self.reload().await?;
         }
-        if !capture_changed {
-            self.state.borrow_mut().applied = new;
-            self.update_watches();
-            connection.send(Response::Applied).await?;
-            return Ok(());
-        }
 
         self.state.borrow_mut().trial = Some(new.clone());
         self.update_watches();
@@ -77,46 +75,113 @@ impl Daemon {
             return Err(error);
         }
         let deadline = Instant::now() + Duration::from_secs(confirm_secs);
-        if let Some(operation) = &mut self.state.borrow_mut().operation {
-            operation.deadline = Some(deadline);
+        let (decide, decision) = oneshot::channel();
+        {
+            let mut state = self.state.borrow_mut();
+            if let Some(operation) = &mut state.operation {
+                operation.deadline = Some(deadline);
+            }
+            state.pending = Some(Pending { rules, decide });
         }
-        let pending = Response::Pending {
-            changes: describe(&old, &new),
+        let waiting = Response::Pending {
+            changes: describe(&old, &new, capture_changed, singbox_changed),
             secs: confirm_secs,
         };
-        let confirmed = if connection.send(pending).await.is_ok() {
-            let request = connection.next().fuse();
+        let (decided, reply) = if connection.send(waiting).await.is_ok() {
+            // The client answers on this connection, unless it left the
+            // change pending; another client may answer in either case.
+            let request = async {
+                if pending {
+                    future::pending().await
+                } else {
+                    connection.next().await
+                }
+            }
+            .fuse();
+            let decision = decision.fuse();
             let expired = sleep(Duration::from_secs(confirm_secs)).fuse();
-            pin_mut!(request, expired);
+            pin_mut!(request, decision, expired);
             select! {
-                request = request => match request {
+                request = request => (match request {
                     Some(Ok(Request::Confirm)) => Ok(()),
                     Some(Ok(Request::Rollback)) => Err("rolled back on request".to_owned()),
                     None => Err("the client went away".to_owned()),
                     _ => Err("unexpected request".to_owned()),
+                }, None),
+                decision = decision => match decision {
+                    Ok(Decision { keep: true, reply }) => (Ok(()), Some(reply)),
+                    Ok(Decision { keep: false, reply }) => {
+                        (Err("rolled back on request".to_owned()), Some(reply))
+                    }
+                    Err(oneshot::Canceled) => (Err("the decision was lost".to_owned()), None),
                 },
-                () = expired => Err(format!("not confirmed within {confirm_secs}s")),
+                () = expired => (Err(format!("not confirmed within {confirm_secs}s")), None),
             }
         } else {
-            Err("the client went away".to_owned())
+            (Err("the client went away".to_owned()), None)
         };
+        self.state.borrow_mut().pending = None;
 
-        match confirmed {
+        match &decided {
             Ok(()) => {
-                eprintln!("applied rules confirmed");
+                eprintln!("applied change confirmed");
                 {
                     let mut state = self.state.borrow_mut();
                     state.applied = state.trial.take().unwrap_or(new);
                 }
                 self.update_watches();
-                connection.send(Response::Confirmed).await?;
             }
             Err(reason) => {
-                eprintln!("applied rules rolled back: {reason}");
+                eprintln!("applied change rolled back: {reason}");
                 self.restore(singbox_changed).await?;
-                let _ = connection.send(Response::RolledBack(reason)).await;
             }
         }
+        let outcome = || match &decided {
+            Ok(()) => Response::Confirmed,
+            Err(reason) => Response::RolledBack(reason.clone()),
+        };
+        if let Some(reply) = reply {
+            let _ = reply.send(outcome());
+        }
+        // The client may have gone away, or left the decision to another.
+        let _ = connection.send(outcome()).await;
+        Ok(())
+    }
+
+    /// Serves `uta confirm`: hands out the rules to write, then confirms or
+    /// rolls back as the client asks.
+    pub(super) async fn confirm(self: &Rc<Self>, connection: &mut Connection) -> Result<()> {
+        let rules = match &self.state.borrow().pending {
+            Some(pending) => pending.rules.clone(),
+            None => bail!("no change is waiting for confirmation"),
+        };
+        connection.send(Response::Confirming(rules)).await?;
+        match connection.next().await {
+            Some(Ok(Request::Confirm)) => self.decide(connection, true).await,
+            Some(Ok(Request::Rollback)) => self.decide(connection, false).await,
+            // The change keeps waiting.
+            None => Ok(()),
+            _ => bail!("unexpected request"),
+        }
+    }
+
+    /// Confirms or rolls back the change waiting for confirmation and reports
+    /// the outcome.
+    pub(super) async fn decide(
+        self: &Rc<Self>,
+        connection: &mut Connection,
+        keep: bool,
+    ) -> Result<()> {
+        let pending = self.state.borrow_mut().pending.take();
+        let Some(pending) = pending else {
+            bail!("no change is waiting for confirmation");
+        };
+        let (reply, outcome) = oneshot::channel();
+        let _ = pending.decide.send(Decision { keep, reply });
+        let outcome = outcome
+            .await
+            .context("the change ended before it was decided")?;
+        connection.send(outcome).await?;
         Ok(())
     }
 
@@ -263,7 +328,7 @@ impl Operation {
     pub(super) fn describe(&self) -> String {
         match self.deadline {
             Some(deadline) => format!(
-                "{} waiting for confirmation, {}s left",
+                "{} waiting for confirmation, {}s left; run `uta confirm` or `uta rollback`",
                 self.kind,
                 deadline.saturating_duration_since(Instant::now()).as_secs()
             ),
@@ -272,8 +337,13 @@ impl Operation {
     }
 }
 
-/// Lines describing how the captured traffic changes.
-fn describe(old: &Applied, new: &Applied) -> Vec<String> {
+/// Lines describing the change.
+fn describe(
+    old: &Applied,
+    new: &Applied,
+    capture_changed: bool,
+    singbox_changed: bool,
+) -> Vec<String> {
     let line = |sign, rule: &Rule, note: &Option<String>| match note {
         Some(note) => format!("{sign} {rule} ({note})"),
         None => format!("{sign} {rule}"),
@@ -293,8 +363,11 @@ fn describe(old: &Applied, new: &Applied) -> Vec<String> {
             Some(_) => {}
         }
     }
-    if changes.is_empty() {
+    if changes.is_empty() && capture_changed {
         changes.push("~ the rules now match other cgroups".to_owned());
+    }
+    if singbox_changed {
+        changes.push("~ the sing-box configuration".to_owned());
     }
     changes
 }
