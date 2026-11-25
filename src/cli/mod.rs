@@ -213,6 +213,7 @@ async fn run(cli: Cli) -> Result<bool> {
         .await
         .map(|()| true),
         Command::Cleanup => {
+            daemon::inherit_capabilities()?;
             let _instance = daemon::acquire_instance()?;
             Kernel::new(netlink::connect()?).remove().await?;
             Ok(true)

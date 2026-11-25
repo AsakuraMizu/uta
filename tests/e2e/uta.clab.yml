@@ -28,7 +28,8 @@ topology:
       image: uta-e2e/ubuntu
       binds:
         - ../../target/debug:/opt/uta:ro
-        - ../../contrib/user/uta.service:/home/alice/.config/systemd/user/uta.service:ro
+        - ../../contrib/user/uta-setcap.service:/home/alice/.config/systemd/user/uta.service:ro
+        - ../../contrib/user/uta-setpriv.service:/home/alice/.config/systemd/user/uta-setpriv.service:ro
       exec:
         # Docker leaves the hostname out of /etc/hosts without a network, and sudo looks it up.
         - sh -c 'echo "127.0.1.1 workstation" >> /etc/hosts'

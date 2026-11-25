@@ -186,8 +186,9 @@ fn kernel_objects(node: &str) -> (usize, usize, usize) {
 }
 
 /// Starts uta on the workstation as alice deploys it, with `rules` and the test
-/// sing-box configuration. The unit reports readiness once traffic is
-/// captured, so `systemctl start` returns only then.
+/// sing-box configuration: from a copy of the build that has the capabilities
+/// uta needs. The unit reports readiness once traffic is captured, so
+/// `systemctl start` returns only then.
 fn start_workstation(rules: &str) {
     start_workstation_with(rules, SING_BOX_CONFIG);
 }
@@ -211,16 +212,32 @@ fn start_workstation_with(rules: &str, sing_box_config: &str) {
     );
     ok(
         "workstation",
+        As::Root,
+        &format!(
+            "cp -u --remove-destination /opt/uta/uta {UTA} && setcap \
+             cap_net_admin,cap_net_bind_service=p {UTA}"
+        ),
+    );
+    start_unit("uta");
+}
+
+fn start_unit(unit: &str) {
+    ok(
+        "workstation",
         As::Alice,
         &format!(
-            "systemctl --user reset-failed uta 2>/dev/null; systemctl --user start uta && {UTA} \
-             status >/dev/null"
+            "systemctl --user reset-failed {unit} 2>/dev/null; systemctl --user start {unit} && \
+             {UTA} status >/dev/null"
         ),
     );
 }
 
 fn stop_workstation() {
-    sh("workstation", As::Alice, "systemctl --user stop uta");
+    sh(
+        "workstation",
+        As::Alice,
+        "systemctl --user stop uta uta-setpriv",
+    );
     assert_eq!(
         kernel_objects("workstation"),
         (0, 0, 0),
@@ -371,6 +388,18 @@ fn run_captures_one_command() {
     );
     assert_eq!(seen("workstation", As::Alice, ORIGIN), WORKSTATION);
     assert_eq!(uta(As::Alice, "run sh -c 'exit 7'").status.code(), Some(7));
+    // What uta runs gains none of the capabilities its file gives uta.
+    let capabilities = stdout(&uta(
+        As::Alice,
+        "run grep -E '^Cap(Prm|Eff|Amb)' /proc/self/status",
+    ));
+    assert_eq!(capabilities.lines().count(), 3, "{capabilities}");
+    assert!(
+        capabilities
+            .lines()
+            .all(|line| line.ends_with("0000000000000000")),
+        "{capabilities}"
+    );
 
     // A run inside a run stays in the enclosing scope.
     let nested = stdout(&uta(
@@ -754,13 +783,25 @@ fn one_daemon_per_network_namespace() {
         "workstation",
         As::Alice,
         &format!(
-            "sudo -n setpriv --reuid=1001 --regid=1001 --init-groups --inh-caps=+net_admin \
-             --ambient-caps=+net_admin -- {UTA} daemon --config {ALICE_CONFIG}/uta.toml --rules \
-             {ALICE_CONFIG}/rules --runtime-dir /tmp/second"
+            "{UTA} daemon --config {ALICE_CONFIG}/uta.toml --rules {ALICE_CONFIG}/rules \
+             --runtime-dir /tmp/second"
         ),
     );
     assert!(!second.status.success());
     assert!(String::from_utf8_lossy(&second.stderr).contains("a uta daemon is running"));
+    assert_eq!(seen("workstation", As::Alice, ORIGIN), RELAY);
+    stop_workstation();
+}
+
+/// Without capabilities on its file, uta runs through the unit that grants them
+/// with sudo.
+#[test]
+fn user_service_through_sudo() {
+    let _topology = lock();
+    start_workstation("uid:alice\n");
+    stop_workstation();
+    ok("workstation", As::Root, &format!("setcap -r {UTA}"));
+    start_unit("uta-setpriv");
     assert_eq!(seen("workstation", As::Alice, ORIGIN), RELAY);
     stop_workstation();
 }

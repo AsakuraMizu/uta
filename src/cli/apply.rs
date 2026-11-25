@@ -257,12 +257,15 @@ fn read_rules(path: &Path) -> Result<String> {
 /// Replaces the rules file through a rename, keeping its mode and writing
 /// through a symlink.
 fn write_rules(path: &Path, text: &str) -> Result<()> {
-    let target = fs::canonicalize(path)?;
-    let mut temporary = target.clone().into_os_string();
-    temporary.push(".uta-new");
-    let temporary = PathBuf::from(temporary);
-    let mode = fs::metadata(&target)?.permissions().mode();
-    fs::write(&temporary, text)?;
-    fs::set_permissions(&temporary, fs::Permissions::from_mode(mode))?;
-    fs::rename(&temporary, &target).with_context(|| format!("failed to write {}", target.display()))
+    let replace = || -> io::Result<()> {
+        let target = fs::canonicalize(path)?;
+        let mut temporary = target.clone().into_os_string();
+        temporary.push(".uta-new");
+        let temporary = PathBuf::from(temporary);
+        let mode = fs::metadata(&target)?.permissions().mode();
+        fs::write(&temporary, text)?;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(mode))?;
+        fs::rename(&temporary, &target)
+    };
+    replace().with_context(|| format!("failed to write {}", path.display()))
 }

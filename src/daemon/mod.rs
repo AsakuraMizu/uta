@@ -21,6 +21,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use caps::{CapSet, Capability};
 use compio::{
     net::{UnixListener, UnixStream},
     runtime::spawn,
@@ -169,6 +170,7 @@ struct Operation {
 }
 
 pub async fn run(options: Options) -> Result<()> {
+    inherit_capabilities()?;
     // Leftovers of a daemon that died are removed even when the configuration
     // it ran no longer loads.
     let _instance = acquire_instance()?;
@@ -553,6 +555,26 @@ async fn stop(process: &Process) {
         let _ = process.signal(Signal::SIGKILL);
         process.exited().await;
     }
+}
+
+/// The capabilities uta works with, which the programs it runs, sing-box and
+/// nft, need too.
+const CAPABILITIES: [Capability; 2] = [Capability::CAP_NET_ADMIN, Capability::CAP_NET_BIND_SERVICE];
+
+/// Makes the capabilities uta holds effective, and ambient so the programs it
+/// runs keep them. Started with them ambient, as by systemd or setpriv, this
+/// changes nothing; started from a file that has them permitted (setcap(8)),
+/// this is what passes them on. Only the daemon and `uta cleanup` do this, so
+/// what `uta run` runs never gains them.
+pub fn inherit_capabilities() -> Result<()> {
+    let permitted = caps::read(None, CapSet::Permitted).context("failed to read capabilities")?;
+    for capability in CAPABILITIES.into_iter().filter(|c| permitted.contains(c)) {
+        for set in [CapSet::Effective, CapSet::Inheritable, CapSet::Ambient] {
+            caps::raise(None, set, capability)
+                .with_context(|| format!("failed to raise {capability}"))?;
+        }
+    }
+    Ok(())
 }
 
 /// Claims the network namespace for one daemon, or for `uta cleanup`, until the

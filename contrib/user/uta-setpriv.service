@@ -6,7 +6,8 @@ Description=uta transparent proxy
 # environment, so uta gets the user manager's notification socket explicitly.
 Type=notify
 NotifyAccess=all
-# uta and sing-box run as the user with the two capabilities they need; sudo only grants them.
+# uta and sing-box run as the user with the two capabilities they need; sudo only grants them,
+# which needs `sudo setpriv` without a password.
 ExecStart=/usr/bin/sudo -n /usr/bin/setpriv --reuid=%U --regid=%G --init-groups \
     --inh-caps=+net_admin,+net_bind_service --ambient-caps=+net_admin,+net_bind_service -- \
     /usr/bin/env NOTIFY_SOCKET=%t/systemd/notify \

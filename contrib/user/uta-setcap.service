@@ -1,0 +1,17 @@
+[Unit]
+Description=uta transparent proxy
+
+[Service]
+# uta reports readiness once traffic is captured.
+Type=notify
+# uta takes the two capabilities it needs from its file, given once with
+# `sudo setcap cap_net_admin,cap_net_bind_service=p ~/.local/bin/uta`, and passes them to sing-box.
+ExecStart=%h/.local/bin/uta daemon --config %E/uta/uta.toml --rules %E/uta/rules --runtime-dir %t/uta
+ExecStopPost=%h/.local/bin/uta cleanup
+RuntimeDirectory=uta
+# uta stops sing-box itself after removing its rules.
+KillMode=mixed
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
