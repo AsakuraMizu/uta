@@ -1,0 +1,3 @@
+#compdef uta
+source <(COMPLETE=zsh uta)
+_clap_dynamic_completer_uta "$@"
