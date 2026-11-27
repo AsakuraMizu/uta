@@ -55,7 +55,7 @@ flowchart LR
 
 - Linux，cgroup v2，nftables（需要 `nft` 命令）。
 - systemd：`uta run` 要用它建 scope；仓库附带的服务文件也是 systemd 的。
-- sing-box 1.11 及以上（在 1.14 上测试；文档里的示例按 1.12 起的配置格式写）。
+- sing-box 1.12 及以上（在 1.14 上测试）。
 
 在 Ubuntu 24.04（Linux 6.8）和 Arch Linux（Linux 7.3）上测试过。
 

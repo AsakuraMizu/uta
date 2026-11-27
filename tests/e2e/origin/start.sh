@@ -18,4 +18,4 @@ while True:
         port11.sendto(b"x" if sock is port10 else sender[0].encode(), sender)
 ' &
 # Without a listen address, dnsmasq answers only directly connected networks.
-exec dnsmasq --keep-in-foreground --listen-address=10.0.4.2,fd00:4::2 --no-resolv --no-hosts --address=/probe.test/198.18.0.1 --address=/probe.test/fc00::1
+exec dnsmasq --keep-in-foreground --listen-address=10.0.4.2,fd00:4::2 --no-resolv --no-hosts --address=/probe.test/192.0.2.1 --address=/probe.test/2001:db8::1

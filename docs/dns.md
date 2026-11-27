@@ -114,3 +114,34 @@ ExecStopPost=+sh -c 'rm -f /run/systemd/resolved.conf.d/uta.conf && systemctl re
 ```
 
 发往 53 端口的查询都不再被接管，不管发给本机解析器还是外部服务器，都和没有 uta 时一样。按域名分流可以靠 sing-box 的 `sniff` 从连接里取得域名。DoT（853 端口）和 DoH（443 端口）是普通的加密连接，会和其他流量一样被接管；不想让它们进 sing-box，就另外排除。
+
+## FakeIP
+
+sing-box 的 FakeIP 对 A 和 AAAA 查询返回假地址段里的地址，程序连这个地址时，sing-box 换回域名再按域名拨号，包括直连的连接。
+
+在已有的 `dns` 配置里加一个 FakeIP 服务器和一条规则，并让 sing-box 把假地址的对应关系存到磁盘：
+
+```json
+"dns": {
+  "servers": [
+    { "type": "fakeip", "tag": "fakeip", "inet4_range": "198.18.0.0/15", "inet6_range": "2001:2::/48" }
+  ],
+  "rules": [
+    { "query_type": ["A", "AAAA"], "server": "fakeip" }
+  ]
+},
+"experimental": {
+  "cache_file": { "enabled": true, "store_fakeip": true }
+}
+```
+
+要拿到真实地址的域名（比如要用 `!dst:` 在内核里放行的直连目标），在这条规则之前加规则交给其他 DNS 服务器。
+
+uta 从 sing-box 配置里读出 FakeIP 的地址段，`uta status` 会显示。发往这些地址的连接只要命中普通规则就会被接管，排除规则对它们不生效：假地址只有 sing-box 认得，不经过它就连不上。
+
+注意：
+
+- `store_fakeip` 要开。`uta apply` 改了 sing-box 配置时会重新加载 sing-box，不存到磁盘的话，之前发出去的假地址都会失效。
+- 能拿到假地址的来源都要有普通规则选中。系统解析器的缓存是共用的（[保留系统解析器](#保留系统解析器)、[systemd-resolved 的上游指向 sing-box](#systemd-resolved-的上游指向-sing-box)），没被选中的程序也会拿到假地址；只接管部分进程时要补一条，比如 `local dst:198.18.0.0/15,2001:2::/48`。网关上没被选中的局域网设备同理。
+- uta 停止后，程序和解析器缓存的假地址要等过期才会重新解析，这期间连不上。sing-box 回复假地址的 TTL 是 600 秒。
+- 发往假地址的 `ping` 不通：uta 只接管 TCP 和 UDP。

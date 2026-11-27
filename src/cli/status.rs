@@ -50,6 +50,12 @@ fn print(status: &Status) {
             println!("uta run: {}, with {}", run.cgroup, run.with.join(", "));
         }
     }
+    if !status.fakeip.is_empty() {
+        println!(
+            "FakeIP ranges, not subject to exclusions: {}",
+            status.fakeip.join(", ")
+        );
+    }
     if let Some(operation) = &status.operation {
         println!("operation: {operation}");
     }

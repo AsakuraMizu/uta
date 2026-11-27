@@ -26,11 +26,22 @@ pub fn ruleset(selection: &Selection, marks: &Marks, ports: &Ports) -> String {
     let output = hook(Origin::Local);
     let prerouting = hook(Origin::Forwarded);
 
+    let family = |v4: bool| -> Vec<String> {
+        selection
+            .fakeip
+            .iter()
+            .filter(|net| matches!(net, IpNet::V4(_)) == v4)
+            .map(ToString::to_string)
+            .collect()
+    };
+
     Ruleset {
         table: TABLE,
         sets,
         output,
         prerouting,
+        fakeip4: family(true),
+        fakeip6: family(false),
         mask: format!("{:#x}", marks.mask),
         keep: format!("{:#010x}", !marks.mask),
         local: format!("{:#x}", marks.local),
@@ -50,6 +61,9 @@ struct Ruleset {
     sets: Vec<Set>,
     output: Hook,
     prerouting: Hook,
+    /// FakeIP ranges, to which the exclusions do not apply.
+    fakeip4: Vec<String>,
+    fakeip6: Vec<String>,
     /// The bits of a mark outside uta's mask, kept when uta sets its own bits.
     keep: String,
     mask: String,

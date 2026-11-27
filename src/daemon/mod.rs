@@ -30,6 +30,7 @@ use compio::{
 };
 use futures_channel::{mpsc::UnboundedReceiver, oneshot};
 use futures_util::{FutureExt, SinkExt, StreamExt, lock::Mutex, pin_mut, select};
+use ipnet::IpNet;
 use netlink_packet_route::RouteNetlinkMessage;
 use netlink_sys::SocketAddr as NetlinkAddr;
 use nix::sys::{
@@ -108,10 +109,10 @@ impl Paths {
 
 struct State {
     process: Rc<Process>,
-    /// The log filter of the configuration sing-box runs, and of the one a
+    /// What uta took from the configuration sing-box runs, and from the one a
     /// reload replaced.
-    log_filter: Option<Level>,
-    previous_log_filter: Option<Level>,
+    checked: Checked,
+    previous_checked: Checked,
     /// An operation is replacing or reloading sing-box and handles its exit
     /// itself.
     replacing: bool,
@@ -123,6 +124,16 @@ struct State {
     operation: Option<Operation>,
     /// The change waiting for confirmation.
     pending: Option<Pending>,
+}
+
+/// What uta takes from a sing-box configuration it checks.
+#[derive(Clone, Debug, Default)]
+struct Checked {
+    /// The level below which log lines are dropped; see
+    /// [`singbox::log_filter`].
+    log_filter: Option<Level>,
+    /// The ranges of FakeIP addresses, to which exclusions do not apply.
+    fakeip: Vec<IpNet>,
 }
 
 /// A change waiting for confirmation, which any client may decide.
@@ -192,16 +203,19 @@ pub async fn run(options: Options) -> Result<()> {
     let paths = Paths::new(&std::path::absolute(&options.runtime_dir)?);
 
     Files::collect(&config)?.write(&paths.current)?;
-    let log_filter = check(&config, &paths.current, &paths.merged).await?;
+    let checked = check(&config, &paths.current, &paths.merged).await?;
     let process = Rc::new(Process::spawn(
         &config.singbox.binary,
         &paths.current,
         &config.singbox.work_dir,
     )?);
-    process.filter_log(log_filter);
+    process.filter_log(checked.log_filter);
     let started = async {
         wait_ready(&process, 0).await?;
-        let mut selection = Selection::default();
+        let mut selection = Selection {
+            fakeip: checked.fakeip.clone(),
+            ..Selection::default()
+        };
         resolved.add_to(&rules, &mut selection);
         selection.normalize();
         kernel.install(&selection, &config).await?;
@@ -230,8 +244,8 @@ pub async fn run(options: Options) -> Result<()> {
         watcher,
         state: RefCell::new(State {
             process: Rc::clone(&process),
-            log_filter,
-            previous_log_filter: None,
+            checked,
+            previous_checked: Checked::default(),
             replacing: false,
             applied: Applied {
                 text,
@@ -465,6 +479,12 @@ impl Daemon {
             rules_changed,
             singbox_changed,
             missing,
+            fakeip: state
+                .checked
+                .fakeip
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
         }
     }
 
@@ -512,7 +532,10 @@ impl Daemon {
     fn selection(&self) -> Selection {
         let state = self.state.borrow();
         let rules = state.trial.as_ref().unwrap_or(&state.applied);
-        let mut selection = Selection::default();
+        let mut selection = Selection {
+            fakeip: state.checked.fakeip.clone(),
+            ..Selection::default()
+        };
         rules.resolved.add_to(&rules.rules, &mut selection);
         for run in &state.runs {
             selection.include.push(Match::cgroup(&run.cgroup));
@@ -539,18 +562,21 @@ fn read_rules(path: &Path) -> Result<String> {
     fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))
 }
 
-/// Checks the configuration in `dir` and returns the level below which its
-/// log lines are dropped; see [`singbox::log_filter`].
-async fn check(config: &Config, dir: &Path, merged: &Path) -> Result<Option<Level>> {
+/// Checks the configuration in `dir` and takes from it what uta needs.
+async fn check(config: &Config, dir: &Path, merged: &Path) -> Result<Checked> {
     let SingBox {
         binary, work_dir, ..
     } = &config.singbox;
     singbox::check(binary, work_dir, dir).await?;
-    let filter = singbox::log_filter(&singbox::merge(binary, work_dir, dir, merged).await?);
-    if filter.is_some() {
+    let merged = singbox::merge(binary, work_dir, dir, merged).await?;
+    let checked = Checked {
+        log_filter: singbox::log_filter(&merged),
+        fakeip: singbox::fakeip_ranges(&merged)?,
+    };
+    if checked.log_filter.is_some() {
         singbox::log_at_info(dir)?;
     }
-    Ok(filter)
+    Ok(checked)
 }
 
 async fn wait_ready(process: &Process, count: u64) -> Result<()> {

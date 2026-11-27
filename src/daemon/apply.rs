@@ -15,13 +15,14 @@ use futures_util::{FutureExt, SinkExt, StreamExt, future, pin_mut, select};
 use nix::sys::signal::Signal;
 
 use super::{
-    Applied, Connection, Daemon, Decision, Operation, Pending, check, read_rules, stop, wait_ready,
+    Applied, Checked, Connection, Daemon, Decision, Operation, Pending, check, read_rules, stop,
+    wait_ready,
 };
 use crate::{
     config::rules::{self, Rule},
     rpc::{Request, Response},
     selection::{CGROUP_ROOT, resolve},
-    singbox::{self, Files, Level, Process},
+    singbox::{self, Files, Process},
 };
 
 impl Daemon {
@@ -64,10 +65,13 @@ impl Daemon {
             connection.send(Response::Unchanged).await?;
             return Ok(());
         }
-        if let Some(filter) = singbox_changed {
-            self.reload(filter).await?;
-        }
-        let singbox_changed = singbox_changed.is_some();
+        let singbox_changed = match singbox_changed {
+            Some(checked) => {
+                self.reload(checked).await?;
+                true
+            }
+            None => false,
+        };
 
         self.state.borrow_mut().trial = Some(new.clone());
         self.update_watches();
@@ -192,16 +196,17 @@ impl Daemon {
     async fn restore(self: &Rc<Self>, singbox_changed: bool) -> Result<()> {
         self.state.borrow_mut().trial = None;
         self.update_watches();
-        let synced = self.sync().await;
+        // What is captured depends on the configuration sing-box runs too.
         let reverted = if singbox_changed {
             self.revert().await
         } else {
             Ok(())
         };
-        let result = match (synced, reverted) {
+        let synced = self.sync().await;
+        let result = match (reverted, synced) {
             (Ok(()), Ok(())) => return Ok(()),
             (Err(error), Ok(())) | (Ok(()), Err(error)) => error,
-            (Err(synced), Err(reverted)) => anyhow!("{synced:#}; {reverted:#}"),
+            (Err(reverted), Err(synced)) => anyhow!("{reverted:#}; {synced:#}"),
         };
         let error = result.context("failed to roll back");
         self.fail(format!("{error:#}"));
@@ -209,8 +214,9 @@ impl Daemon {
     }
 
     /// Resolves the rules and, if the sing-box configuration changed, writes
-    /// and checks it in the staging directory and returns its log filter.
-    async fn prepare(&self, rules: Option<String>) -> Result<(Applied, Option<Option<Level>>)> {
+    /// and checks it in the staging directory and returns what uta takes from
+    /// it.
+    async fn prepare(&self, rules: Option<String>) -> Result<(Applied, Option<Checked>)> {
         let text = match rules {
             Some(text) => text,
             None => read_rules(&self.rules_path)?,
@@ -246,20 +252,20 @@ impl Daemon {
         Some(OperationGuard(self))
     }
 
-    /// Makes sing-box run the staging configuration, whose log filter is
-    /// `filter`. On failure, sing-box runs the previous configuration again.
-    async fn reload(self: &Rc<Self>, filter: Option<Level>) -> Result<()> {
+    /// Makes sing-box run the staging configuration, from which uta took
+    /// `checked`. On failure, sing-box runs the previous configuration again.
+    async fn reload(self: &Rc<Self>, checked: Checked) -> Result<()> {
         singbox::remove_dir(&self.paths.previous)?;
         fs::rename(&self.paths.current, &self.paths.previous)?;
         fs::rename(&self.paths.staging, &self.paths.current)?;
-        self.swap_log_filter(filter);
+        self.swap_checked(checked);
         let Err(error) = self.hup().await else {
             return Ok(());
         };
         fs::rename(&self.paths.current, &self.paths.staging)?;
         fs::rename(&self.paths.previous, &self.paths.current)?;
-        let filter = self.state.borrow().previous_log_filter;
-        self.swap_log_filter(filter);
+        let checked = self.state.borrow().previous_checked.clone();
+        self.swap_checked(checked);
         self.restart().await?;
         Err(error
             .context("sing-box failed with the new configuration; it runs the previous one again"))
@@ -270,20 +276,20 @@ impl Daemon {
         singbox::remove_dir(&self.paths.staging)?;
         fs::rename(&self.paths.current, &self.paths.staging)?;
         fs::rename(&self.paths.previous, &self.paths.current)?;
-        let filter = self.state.borrow().previous_log_filter;
-        self.swap_log_filter(filter);
+        let checked = self.state.borrow().previous_checked.clone();
+        self.swap_checked(checked);
         if self.hup().await.is_err() {
             self.restart().await?;
         }
         Ok(())
     }
 
-    /// Makes `filter` the log filter of the configuration sing-box runs, and
-    /// the one it replaces the previous.
-    fn swap_log_filter(&self, filter: Option<Level>) {
+    /// Makes `checked` what uta took from the configuration sing-box runs, and
+    /// what it replaces the previous.
+    fn swap_checked(&self, checked: Checked) {
         let mut state = self.state.borrow_mut();
-        state.previous_log_filter = std::mem::replace(&mut state.log_filter, filter);
-        state.process.filter_log(filter);
+        state.previous_checked = std::mem::replace(&mut state.checked, checked);
+        state.process.filter_log(state.checked.log_filter);
     }
 
     /// Sends SIGHUP and waits for sing-box to report startup with the
@@ -317,7 +323,7 @@ impl Daemon {
                 &self.paths.current,
                 &self.config.singbox.work_dir,
             )?);
-            process.filter_log(self.state.borrow().log_filter);
+            process.filter_log(self.state.borrow().checked.log_filter);
             self.state.borrow_mut().process = Rc::clone(&process);
             self.watch(&process);
             wait_ready(&process, 0).await?;

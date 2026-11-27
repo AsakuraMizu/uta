@@ -30,9 +30,20 @@ table inet {{ table }} {
 		ct mark & {{ mask }} == {{ local }} meta mark set meta mark & {{ keep }} | {{ local }} return
 		# Rule changes apply to new connections only; rerouting an established one would break it.
 		ct state != new return
+		# Only sing-box can reach a FakeIP address, so the exclusions do not apply to it.
+		{%- if !fakeip4.is_empty() %}
+		ip daddr { {{ fakeip4|join(", ") }} } goto output_include
+		{%- endif %}
+		{%- if !fakeip6.is_empty() %}
+		ip6 daddr { {{ fakeip6|join(", ") }} } goto output_include
+		{%- endif %}
 		{%- for matchers in output.exclude %}
 		{{ matchers }} return
 		{%- endfor %}
+		goto output_include
+	}
+
+	chain output_include {
 		{%- for matchers in output.include %}
 		{{ matchers }} goto output_selected
 		{%- endfor %}
@@ -63,9 +74,19 @@ table inet {{ table }} {
 		ct direction reply return
 		ct mark & {{ mask }} == {{ forward }} meta mark set meta mark & {{ keep }} | {{ forward }} goto deliver
 		ct state != new return
+		{%- if !fakeip4.is_empty() %}
+		ip daddr { {{ fakeip4|join(", ") }} } goto prerouting_include
+		{%- endif %}
+		{%- if !fakeip6.is_empty() %}
+		ip6 daddr { {{ fakeip6|join(", ") }} } goto prerouting_include
+		{%- endif %}
 		{%- for matchers in prerouting.exclude %}
 		{{ matchers }} return
 		{%- endfor %}
+		goto prerouting_include
+	}
+
+	chain prerouting_include {
 		{%- for matchers in prerouting.include %}
 		{{ matchers }} goto prerouting_selected
 		{%- endfor %}

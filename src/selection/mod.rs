@@ -22,6 +22,9 @@ pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 pub struct Selection {
     pub include: Vec<Match>,
     pub exclude: Vec<Match>,
+    /// Destinations the exclusions do not apply to: the FakeIP ranges of the
+    /// sing-box configuration, whose addresses only sing-box can reach.
+    pub fakeip: Vec<IpNet>,
 }
 
 impl Selection {
@@ -30,6 +33,8 @@ impl Selection {
             matches.sort();
             matches.dedup();
         }
+        self.fakeip.sort();
+        self.fakeip.dedup();
     }
 }
 

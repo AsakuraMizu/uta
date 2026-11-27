@@ -11,11 +11,12 @@ uta 是 sing-box 的透明代理控制器：一个二进制，`uta daemon` 负�
 ## 与 sing-box 的边界
 
 - uta 只生成一个路径排在最前的片段，里面是 uta 的入站和 `route.default_mark`。sing-box 合并多个配置文件时同一个标量以先出现的为准，所以片段里每个标量都会覆盖用户的同名设置；加字段前先确认这一点。
-- 不解析、不改写用户的 sing-box 配置，不提供 DNS 或分流开关。只通过 `sing-box merge` 的结果检查 uta 依赖的约定：入站标签不冲突，日志能输出就绪标记。
+- 不改写用户的 sing-box 配置，不提供 DNS 或分流开关。只从 `sing-box merge` 的结果里读两类东西：uta 依赖的约定（入站标签不冲突，日志能输出就绪标记），和影响接管判定的 FakeIP 地址段。
 
 ## 不变量
 
 - 已经带 fwmark 的包不接管；sing-box 自身流量、用户出站的 `routing_mark` 和其他打 mark 的软件都靠这一条避免回环。
+- 排除规则对 FakeIP 地址段不生效：假地址只有 sing-box 能连，是否接管只看普通规则。
 - 是否接管在连接建立时决定一次，之后靠 ct mark 延续；改规则只影响新连接。
 - uta 退出时（包括因 sing-box 退出而 shutdown）清理自己的全部内核状态。sing-box 在运行而上游失败时，被接管的请求失败，uta 不把它改道直连。
 - 磁盘上不记事务状态，内核状态随时能由配置重建；daemon 启动先 cleanup。cleanup 按 nft 表名和 protocol 号删除，不读配置。

@@ -12,6 +12,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use compio::process::Command;
+use ipnet::IpNet;
 use serde_json::{Value, json};
 
 pub use self::process::Process;
@@ -261,6 +262,26 @@ pub fn log_filter(merged: &Value) -> Option<Level> {
     }
 }
 
+/// The ranges the merged configuration's FakeIP DNS servers hand out addresses
+/// from.
+pub fn fakeip_ranges(merged: &Value) -> Result<Vec<IpNet>> {
+    let mut ranges = Vec::new();
+    for server in merged["dns"]["servers"].as_array().into_iter().flatten() {
+        if server["type"] != "fakeip" {
+            continue;
+        }
+        for field in ["inet4_range", "inet6_range"] {
+            if let Some(range) = server[field].as_str() {
+                let range: IpNet = range
+                    .parse()
+                    .with_context(|| format!("invalid FakeIP range {range}"))?;
+                ranges.push(range.trunc());
+            }
+        }
+    }
+    Ok(ranges)
+}
+
 /// Makes the configuration in `dir` log at info, through uta's fragment.
 pub fn log_at_info(dir: &Path) -> Result<()> {
     let path = dir.join(FRAGMENT);
@@ -301,5 +322,21 @@ mod tests {
             log_filter(&json!({ "log": { "level": "error" } })),
             Some(Level::Error)
         );
+    }
+
+    #[test]
+    fn fakeip_ranges_of_fakeip_servers() {
+        let merged = json!({ "dns": { "servers": [
+            { "type": "udp", "tag": "remote", "server": "192.0.2.1" },
+            { "type": "fakeip", "tag": "fake", "inet4_range": "198.18.0.1/15", "inet6_range": "2001:2::/48" },
+            { "type": "fakeip", "tag": "fake4", "inet4_range": "203.0.113.0/24" },
+        ] } });
+        let ranges: Vec<String> = fakeip_ranges(&merged)
+            .unwrap()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(ranges, ["198.18.0.0/15", "2001:2::/48", "203.0.113.0/24"]);
+        assert!(fakeip_ranges(&json!({})).unwrap().is_empty());
     }
 }

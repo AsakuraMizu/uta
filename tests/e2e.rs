@@ -28,8 +28,8 @@ const WORKSTATION: &str = "10.0.1.2";
 const CLIENT: &str = "192.168.10.2";
 /// What the resolver behind the relay and the one on origin answer for
 /// `probe.test`.
-const PROXIED: &str = "198.18.0.2";
-const DIRECT: &str = "198.18.0.1";
+const PROXIED: &str = "192.0.2.2";
+const DIRECT: &str = "192.0.2.1";
 
 /// Holds the topology, which the tests share, for one test. Runners may run
 /// each test in a process of its own, so the lock is a name in the abstract
@@ -646,6 +646,52 @@ fn sing_box_changes_need_confirmation_too() {
     assert_eq!(seen("workstation", As::Alice, ORIGIN), WORKSTATION);
     assert!(uta(As::Alice, "rollback").status.success());
     assert_eq!(seen("workstation", As::Alice, ORIGIN), RELAY);
+    stop_workstation();
+}
+
+#[test]
+fn exclusions_do_not_apply_to_fakeip_addresses() {
+    let _topology = lock();
+    start_workstation("local\n!uid:bob\n");
+    let mut config: serde_json::Value = serde_json::from_str(SING_BOX_CONFIG).unwrap();
+    let servers = config["dns"]["servers"].as_array_mut().unwrap();
+    servers.push(serde_json::json!({
+        "type": "fakeip", "tag": "fakeip", "inet4_range": "198.18.0.0/15", "inet6_range": "2001:2::/48"
+    }));
+    servers.push(serde_json::json!({
+        "type": "hosts", "tag": "hosts", "predefined": { "origin.test": "10.0.4.2" }
+    }));
+    config["dns"]["rules"] = serde_json::json!([
+        { "domain": "origin.test", "query_type": ["A", "AAAA"], "server": "fakeip" }
+    ]);
+    config["route"]["default_domain_resolver"] = "remote".into();
+    // The relay cannot resolve the name, so sing-box hands it the address.
+    config["route"]["rules"].as_array_mut().unwrap().push(
+        serde_json::json!({ "domain": "origin.test", "action": "resolve", "server": "hosts" }),
+    );
+    write(
+        "workstation",
+        &format!("{ALICE_CONFIG}/sing-box/config.json"),
+        &config.to_string(),
+        "alice:alice",
+    );
+    assert!(uta(As::Alice, "apply --yes").status.success());
+
+    let fake = ok(
+        "workstation",
+        As::Alice,
+        "dig +short +time=3 +tries=1 @10.0.4.2 origin.test",
+    );
+    let octets = fake.parse::<std::net::Ipv4Addr>().unwrap().octets();
+    assert!(
+        octets[0] == 198 && octets[1] & 0xfe == 18,
+        "{fake} is not a FakeIP address"
+    );
+    let url = format!("http://{fake}/");
+    assert_eq!(seen("workstation", As::Alice, &url), RELAY);
+    // An excluded process may get a FakeIP address from a resolver it shares.
+    assert_eq!(seen("workstation", As::Bob, &url), RELAY);
+    assert_eq!(seen("workstation", As::Bob, ORIGIN), WORKSTATION);
     stop_workstation();
 }
 

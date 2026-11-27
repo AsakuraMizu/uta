@@ -100,6 +100,8 @@ pub struct Status {
     pub singbox_changed: bool,
     /// What uta installed in the kernel and is no longer there.
     pub missing: Vec<String>,
+    /// The FakeIP ranges of the sing-box configuration.
+    pub fakeip: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
