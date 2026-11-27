@@ -67,13 +67,20 @@ impl Kernel {
         let mut missing = route::missing(&self.handle, &config.kernel)
             .await
             .context("failed to read policy routing")?;
-        if nft(format!("list table inet {}\n", nft::TABLE))
-            .await
-            .is_err()
-        {
+        if !has_table().await {
             missing.push(format!("nftables table inet {}", nft::TABLE));
         }
         Ok(missing)
+    }
+
+    /// Forgets the table uta installed if another program deleted it, so that
+    /// the next install puts it back. Returns whether it did.
+    pub async fn forget_deleted_table(&mut self) -> bool {
+        if self.installed.is_none() || has_table().await {
+            return false;
+        }
+        self.installed = None;
+        true
     }
 
     /// Removes everything uta installed, including leftovers of an earlier
@@ -95,6 +102,12 @@ impl Kernel {
             (Err(table), Err(routes)) => Err(anyhow!("{table:#}; {routes:#}")),
         }
     }
+}
+
+async fn has_table() -> bool {
+    nft(format!("list table inet {}\n", nft::TABLE))
+        .await
+        .is_ok()
 }
 
 async fn nft(script: String) -> Result<()> {

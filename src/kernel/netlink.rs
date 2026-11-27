@@ -1,4 +1,4 @@
-//! rtnetlink on the compio runtime.
+//! Netlink on the compio runtime.
 
 use std::{
     io,
@@ -9,8 +9,12 @@ use std::{
 use compio::runtime::fd::PollFd;
 use futures_channel::mpsc::UnboundedReceiver;
 use netlink_packet_route::RouteNetlinkMessage;
-use netlink_sys::{AsyncSocket, Socket, SocketAddr};
-use rtnetlink::{Handle, MulticastGroup, packet_core::NetlinkMessage};
+use netlink_sys::{AsyncSocket, AsyncSocketExt, Socket, SocketAddr, protocols::NETLINK_NETFILTER};
+use nix::libc::{ENOBUFS, NFNL_SUBSYS_NFTABLES, NFNLGRP_NFTABLES, NFT_MSG_DELTABLE};
+use rtnetlink::{
+    Handle, MulticastGroup,
+    packet_core::{NetlinkBuffer, NetlinkMessage},
+};
 
 /// Opens an rtnetlink connection whose I/O task runs on the current compio
 /// runtime.
@@ -33,6 +37,58 @@ pub fn watch_routing()
         ])?;
     compio::runtime::spawn(connection).detach();
     Ok(messages)
+}
+
+/// Announcements of committed nftables changes, received on the current compio
+/// runtime.
+pub struct NftablesEvents(CompioSocket);
+
+impl NftablesEvents {
+    pub fn new() -> io::Result<Self> {
+        let mut socket = CompioSocket::new(NETLINK_NETFILTER)?;
+        socket.socket_mut().bind_auto()?;
+        socket
+            .socket_ref()
+            .add_membership(NFNLGRP_NFTABLES as u32)?;
+        Ok(Self(socket))
+    }
+
+    /// Waits until a table may have been deleted: its deletion was announced,
+    /// or announcements were lost. Discards the announcements already received.
+    pub async fn table_deleted(&self) -> io::Result<()> {
+        loop {
+            match self.0.recv_from_full().await {
+                Ok((buf, _)) if !deletes_table(&buf) => continue,
+                Ok(_) => break,
+                Err(error) if error.raw_os_error() == Some(ENOBUFS) => break,
+                Err(error) => return Err(error),
+            }
+        }
+        loop {
+            match self.0.socket_ref().recv_from_full() {
+                Ok(_) => {}
+                Err(error) if error.raw_os_error() == Some(ENOBUFS) => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+/// Whether a datagram of nftables announcements, which the kernel coalesces,
+/// announces a table deletion.
+fn deletes_table(mut buf: &[u8]) -> bool {
+    const DELTABLE: u16 = (NFNL_SUBSYS_NFTABLES << 8 | NFT_MSG_DELTABLE) as u16;
+    while let Ok(message) = NetlinkBuffer::new_checked(buf) {
+        if message.message_type() == DELTABLE {
+            return true;
+        }
+        let Some(rest) = buf.get((message.length() as usize).next_multiple_of(4)..) else {
+            break;
+        };
+        buf = rest;
+    }
+    false
 }
 
 pub struct CompioSocket {

@@ -186,6 +186,7 @@ pub async fn run(options: Options) -> Result<()> {
         rules::parse(&text).with_context(|| format!("invalid {}", options.rules.display()))?;
     let resolved = resolve::resolve(&rules, Path::new(CGROUP_ROOT))?;
     let routing = netlink::watch_routing().context("failed to watch policy routing")?;
+    let nftables = netlink::NftablesEvents::new().context("failed to watch nftables")?;
     let watcher = Watcher::new().context("failed to watch the cgroup tree")?;
     watcher.set_dirs(&resolved.dirs);
     let paths = Paths::new(&std::path::absolute(&options.runtime_dir)?);
@@ -248,6 +249,7 @@ pub async fn run(options: Options) -> Result<()> {
     daemon.watch(&process);
     spawn(Rc::clone(&daemon).track()).detach();
     spawn(Rc::clone(&daemon).keep_routes(routing)).detach();
+    spawn(Rc::clone(&daemon).keep_table(nftables)).detach();
     let served = daemon.serve(listener, fatal_receiver).await;
     let stopped = daemon.shutdown().await;
     served.and(stopped)
@@ -404,6 +406,24 @@ impl Daemon {
                     );
                 }
                 Err(error) => eprintln!("{error:#}"),
+            }
+        }
+    }
+
+    /// Puts back the nftables table whenever another program deletes it, as
+    /// `nft flush ruleset` does.
+    async fn keep_table(self: Rc<Self>, events: netlink::NftablesEvents) {
+        loop {
+            if let Err(error) = events.table_deleted().await {
+                eprintln!("stopped watching nftables: {error}");
+                return;
+            }
+            if !self.kernel.lock().await.forget_deleted_table().await {
+                continue;
+            }
+            match self.sync().await {
+                Ok(()) => eprintln!("put back the nftables table another program removed"),
+                Err(error) => eprintln!("failed to put back the nftables table: {error:#}"),
             }
         }
     }

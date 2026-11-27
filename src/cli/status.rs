@@ -63,8 +63,8 @@ fn print(status: &Status) {
     }
     if !status.missing.is_empty() {
         println!(
-            "Missing from the kernel: {}. Another program removed it; restart the daemon to \
-             install it again.",
+            "Missing from the kernel: {}. Another program removed it and uta could not put it \
+             back; see the daemon's log.",
             status.missing.join(", ")
         );
     }

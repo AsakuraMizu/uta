@@ -35,7 +35,7 @@ uta status
 
 显示 sing-box 是否在运行、当前生效的规则，以及规则文件或 sing-box 配置是否改过还没应用。
 
-uta 加到内核里的东西被其他程序删掉时，`status` 会列出缺了什么，并以非零状态退出。路由规则被删（默认配置下 systemd-networkd 启动时会删掉不是它配置的规则）uta 会自己补回；nftables 表被删（比如重启 `nftables.service` 时执行了 `flush ruleset`）要重启 uta。
+uta 加到内核里的东西被其他程序删掉时，uta 会自己补回：比如 systemd-networkd 启动时删掉不是它配置的路由规则（默认配置下），或者重启 `nftables.service` 时执行 `flush ruleset` 删掉 nftables 表。补回之前，被选中的流量直连。补不回时，`status` 会列出缺了什么并以非零状态退出，原因见日志。
 
 **看日志**
 

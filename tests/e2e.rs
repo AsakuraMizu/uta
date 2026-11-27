@@ -355,7 +355,12 @@ fn kernel_state_removed_by_another_program() {
     assert!(uta(As::Alice, "status").status.success());
 
     ok("workstation", As::Root, "nft delete table inet uta");
-    assert!(!uta(As::Alice, "status").status.success());
+    wait_until(
+        "uta puts the nftables table back",
+        Duration::from_secs(5),
+        || seen("workstation", As::Alice, ORIGIN) == RELAY,
+    );
+    assert!(uta(As::Alice, "status").status.success());
     stop_workstation();
 }
 
