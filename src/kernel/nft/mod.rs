@@ -8,7 +8,7 @@ use ipnet::IpNet;
 
 use crate::{
     config::{
-        Marks, Ports,
+        Kernel, Ports,
         rules::{IfacePattern, Origin},
     },
     selection::{Match, Selection, Test, Value},
@@ -17,7 +17,8 @@ use crate::{
 pub const TABLE: &str = "uta";
 
 /// A script for `nft -f` that replaces uta's table in one transaction.
-pub fn ruleset(selection: &Selection, marks: &Marks, ports: &Ports) -> String {
+pub fn ruleset(selection: &Selection, kernel: &Kernel, ports: &Ports) -> String {
+    let marks = &kernel.marks;
     let mut sets = Vec::new();
     let mut hook = |origin| Hook {
         exclude: statements(&selection.exclude, origin, "exclude", &mut sets),
@@ -49,6 +50,7 @@ pub fn ruleset(selection: &Selection, marks: &Marks, ports: &Ports) -> String {
         dns: format!("{:#x}", marks.mask),
         tproxy_port: ports.tproxy,
         dns_port: ports.dns,
+        zone: kernel.conntrack_zone,
     }
     .render()
     .expect("the ruleset template has no fallible parts")
@@ -61,6 +63,8 @@ struct Ruleset {
     sets: Vec<Set>,
     output: Hook,
     prerouting: Hook,
+    /// The conntrack zone of redirected DNS queries from this host.
+    zone: u16,
     /// FakeIP ranges, to which the exclusions do not apply.
     fakeip4: Vec<String>,
     fakeip6: Vec<String>,

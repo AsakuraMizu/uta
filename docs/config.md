@@ -17,13 +17,14 @@ dns = 7853
 mark_mask = 0x3000
 route_table = 7500
 rule_priority = 5200
+conntrack_zone = 7500
 ```
 
 除了 `singbox.config`，都可以省略，上面写的就是默认值。
 
 - `binary` 只写命令名时在 `PATH` 里找；带路径分隔符的相对路径和 `config` 里的相对路径都相对于 `uta.toml` 所在的目录。`config` 写目录时，读取其中所有 `.json` 文件，按文件名排序。
 - `ports`：uta 给 sing-box 加的两个入站的端口，和本机其他服务冲突时再改。
-- `kernel`：uta 用的包标记位（`mark_mask` 必须恰好包含两个 `1` 比特）、路由表号，以及从 `rule_priority` 开始连续 4 个 `ip rule` 优先级。只有和本机其他软件冲突时才需要改。
+- `kernel`：uta 用的包标记位（`mark_mask` 必须恰好包含两个 `1` 比特）、路由表号、从 `rule_priority` 开始连续 4 个 `ip rule` 优先级，以及被重定向的本机 DNS 查询所在的 conntrack zone（不能是 0）。只有和本机其他软件冲突时才需要改。
 
 `uta.toml` 只在 uta 启动时读取，改完要重启 uta。
 

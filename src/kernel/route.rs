@@ -34,6 +34,7 @@ pub async fn install(handle: &Handle, kernel: &Kernel) -> Result<usize, rtnetlin
         marks,
         route_table: table,
         rule_priority: first,
+        ..
     } = *kernel;
     let skip = first + 3;
     let mut added = 0;

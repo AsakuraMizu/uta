@@ -53,6 +53,8 @@ pub struct Kernel {
     pub route_table: u32,
     /// The first of the four consecutive `ip rule` priorities uta uses.
     pub rule_priority: u32,
+    /// The conntrack zone of DNS queries to this host that uta redirects.
+    pub conntrack_zone: u16,
 }
 
 /// Packet and conntrack mark values, all within a two-bit mask.
@@ -111,6 +113,7 @@ struct RawKernel {
     mark_mask: u32,
     route_table: u32,
     rule_priority: u32,
+    conntrack_zone: u16,
 }
 
 impl Default for RawKernel {
@@ -119,6 +122,7 @@ impl Default for RawKernel {
             mark_mask: 0x3000,
             route_table: 7500,
             rule_priority: 5200,
+            conntrack_zone: 7500,
         }
     }
 }
@@ -173,6 +177,10 @@ impl Config {
             "kernel.rule_priority must be between 1 and {}",
             u32::MAX - 3
         );
+        ensure!(
+            kernel.conntrack_zone != 0,
+            "kernel.conntrack_zone 0 is the default zone"
+        );
 
         Ok(Self {
             singbox: SingBox {
@@ -185,6 +193,7 @@ impl Config {
                 marks: Marks::from_mask(kernel.mark_mask)?,
                 route_table: kernel.route_table,
                 rule_priority: kernel.rule_priority,
+                conntrack_zone: kernel.conntrack_zone,
             },
         })
     }
@@ -250,6 +259,10 @@ mod tests {
         assert_eq!(
             with("[kernel]\nroute_table = 254\n"),
             "kernel.route_table 254 is reserved"
+        );
+        assert_eq!(
+            with("[kernel]\nconntrack_zone = 0\n"),
+            "kernel.conntrack_zone 0 is the default zone"
         );
         assert_eq!(error("[singbox]\nconfig = []\n"), "singbox.config is empty");
     }

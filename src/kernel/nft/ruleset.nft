@@ -18,6 +18,19 @@ table inet {{ table }} {
 	chain output_raw {
 		type filter hook output priority raw; policy accept;
 		meta l4proto udp fib saddr type != local notrack
+		# The redirection of a query to a resolver on this host is bound to its conntrack entry. A
+		# socket that reuses the source port of another socket's recent query would join that
+		# entry, so redirected queries get a zone of their own, decided before conntrack.
+		meta l4proto udp meta mark 0 fib daddr type local th dport 53 goto output_raw_dns
+	}
+
+	chain output_raw_dns {
+		{%- for matchers in output.exclude %}
+		{{ matchers }} return
+		{%- endfor %}
+		{%- for matchers in output.include %}
+		{{ matchers }} ct original zone set {{ zone }} return
+		{%- endfor %}
 	}
 
 	chain output {
@@ -27,9 +40,14 @@ table inet {{ table }} {
 		# software that routes its own traffic.
 		meta mark != 0 return
 		ct direction reply return
-		ct mark & {{ mask }} == {{ local }} meta mark set meta mark & {{ keep }} | {{ local }} return
-		# Rule changes apply to new connections only; rerouting an established one would break it.
-		ct state != new return
+		ct mark & {{ mask }} == {{ dns }} return
+		# A TCP connection keeps its path; rerouting an established one would break it.
+		meta l4proto tcp ct mark & {{ mask }} == {{ local }} meta mark set meta mark & {{ keep }} | {{ local }} return
+		meta l4proto tcp ct state != new return
+		# Datagrams follow the rules one by one: a socket that reuses the source port of another
+		# socket's recent datagrams joins their conntrack entry, and a datagram flow survives a
+		# change of path.
+		meta l4proto udp ct mark set ct mark & {{ keep }}
 		# Only sing-box can reach a FakeIP address, so the exclusions do not apply to it.
 		{%- if !fakeip4.is_empty() %}
 		ip daddr { {{ fakeip4|join(", ") }} } goto output_include

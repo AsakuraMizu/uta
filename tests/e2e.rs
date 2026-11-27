@@ -266,6 +266,32 @@ fn captures_the_selected_user_only() {
 }
 
 #[test]
+fn sockets_reusing_a_port_follow_their_own_capture() {
+    let _topology = lock();
+    start_workstation("uid:alice\n");
+    // Each pair sends from the same source port to the same destination, so
+    // the second socket meets the conntrack entry the first one left.
+    let query = |user, port| {
+        stdout(&sh(
+            "workstation",
+            user,
+            &format!("dig +short +time=2 +tries=1 -b 127.0.0.1#{port} @127.0.0.53 probe.test"),
+        ))
+    };
+    assert_eq!(query(As::Bob, 43001), DIRECT);
+    assert_eq!(query(As::Alice, 43001), PROXIED);
+    assert_eq!(query(As::Alice, 43002), PROXIED);
+    assert_eq!(query(As::Bob, 43002), DIRECT);
+
+    let echo = |port| format!("UDP4:10.0.4.2:9,sourceport={port}");
+    assert_eq!(seen_udp("workstation", As::Bob, &echo(43003)), WORKSTATION);
+    assert_eq!(seen_udp("workstation", As::Alice, &echo(43003)), RELAY);
+    assert_eq!(seen_udp("workstation", As::Alice, &echo(43004)), RELAY);
+    assert_eq!(seen_udp("workstation", As::Bob, &echo(43004)), WORKSTATION);
+    stop_workstation();
+}
+
+#[test]
 fn dns_of_captured_sockets_reaches_sing_box() {
     let _topology = lock();
     start_workstation("uid:alice\n");

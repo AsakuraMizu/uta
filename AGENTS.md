@@ -17,7 +17,7 @@ uta 是 sing-box 的透明代理控制器：一个二进制，`uta daemon` 负�
 
 - 已经带 fwmark 的包不接管；sing-box 自身流量、用户出站的 `routing_mark` 和其他打 mark 的软件都靠这一条避免回环。
 - 排除规则对 FakeIP 地址段不生效：假地址只有 sing-box 能连，是否接管只看普通规则。
-- 是否接管在连接建立时决定一次，之后靠 ct mark 延续；改规则只影响新连接。
+- TCP 连接和转发流量是否接管在连接建立时决定一次，之后靠 ct mark 延续；改规则只影响新连接。本机发出的 UDP 每个包都重新判定：别的 socket 可能沿用同一组地址和端口、加入旧的 conntrack 记录。被重定向到 `uta-dns` 的本机查询在 raw 里判定并放进单独的 conntrack zone，因为重定向绑在 conntrack 记录上。
 - uta 退出时（包括因 sing-box 退出而 shutdown）清理自己的全部内核状态。sing-box 在运行而上游失败时，被接管的请求失败，uta 不把它改道直连。
 - 磁盘上不记事务状态，内核状态随时能由配置重建；daemon 启动先 cleanup。cleanup 按 nft 表名和 protocol 号删除，不读配置。
 - daemon 只依赖 `CAP_NET_ADMIN` 和 `CAP_NET_BIND_SERVICE`；后者不能省，透明 UDP 回包要绑定原目标的低端口（53、443）。

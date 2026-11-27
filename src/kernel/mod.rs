@@ -42,7 +42,7 @@ impl Kernel {
                 .context("failed to install policy routing")?;
             self.routes = true;
         }
-        let ruleset = nft::ruleset(selection, &config.kernel.marks, &config.ports);
+        let ruleset = nft::ruleset(selection, &config.kernel, &config.ports);
         nft(ruleset).await?;
         self.installed = Some(selection.clone());
         Ok(())
